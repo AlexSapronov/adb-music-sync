@@ -257,10 +257,13 @@ class MainWindow(QMainWindow):
         self.refresh_btn.setEnabled(not running)
 
     def _on_progress(self, progress) -> None:
-        self.counter.setText(f"{progress.current_index} / {progress.transferred_files}")
+        total = progress.total_files
+        self.counter.setText(f"{progress.current_index} / {total}")
         self.current_file.setText(progress.current_file or "—")
         self.stats.setText(
-            f"Успешно: {progress.transferred_files} | См. резюме ниже при завершении"
+            f"Успешно: {progress.transferred_files}"
+            f" | Пропущено: {progress.skipped_files}"
+            f" | Ошибок: {progress.error_files}"
         )
 
     def _log(self, msg: str) -> None:
@@ -286,8 +289,10 @@ class MainWindow(QMainWindow):
         if not folder:
             QMessageBox.warning(self, APP_NAME, "Укажите папку с музыкой на ПК.")
             return
-        self.ctrl.scan_library_async(folder)
-        self.ctrl.build_plan_async(self.dest_edit.text())
+        # Single orchestrated flow: scan -> (controller auto) -> build plan -> READY.
+        # The controller chains the plan-build after the scan callback, so we
+        # must NOT call build_plan_async here (it would collide with the scan).
+        self.ctrl.scan_library_async(folder, destination=self.dest_edit.text())
 
     def _start(self) -> None:
         self.ctrl.start_transfer(self.dest_edit.text())
