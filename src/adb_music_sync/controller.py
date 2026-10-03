@@ -71,6 +71,7 @@ class Controller(QObject):
         self.state = AppState.IDLE
         self._worker: _WorkerThread | None = None
         self._engine_lock = threading.Lock()
+        self._pending_destination: str | None = None
 
     # -- wiring ------------------------------------------------------------
     def _connect(self) -> None:
@@ -132,14 +133,28 @@ class Controller(QObject):
                 return
 
     # -- scanning ----------------------------------------------------------
-    def scan_library_async(self, folder: str) -> None:
+    def scan_library_async(self, folder: str, destination: str | None = None) -> None:
+        """Scan the local library, then (optionally) auto-build the plan.
+
+        When ``destination`` is given, the plan is built automatically as
+        soon as the scan finishes — this is the "Проверить" happy path:
+        scan -> callback -> build plan -> callback -> READY. The two steps
+        are chained sequentially on purpose (never two QThreads at once).
+        """
         self.set_state(AppState.SCANNING)
+        self._pending_destination = destination
         self._run_background(lambda: scan_library(folder), self._on_scan_done)
 
     def _on_scan_done(self, result: ScanResult) -> None:
         self.scan_result = result
         self.scan_changed.emit(result)
         log.info("Scanned %d files, %d bytes", len(result.files), result.total_bytes)
+        if self._pending_destination is not None:
+            dest = self._pending_destination
+            self._pending_destination = None
+            self.build_plan_async(dest)
+        else:
+            self.set_state(AppState.READY)
 
     # -- plan (pre-check) --------------------------------------------------
     def build_plan_async(self, destination: str) -> None:
@@ -165,9 +180,15 @@ class Controller(QObject):
             # build full plan from scan
             items = [TransferItem(source=f, remote_rel=f.rel_path) for f in self.scan_result.files]
             engine.plan = P(items=items)
-            engine.check_space()
+            # Order matters: probe remote sizes, drop already-present files
+            # from the queue, THEN check space. check_space() must only count
+            # files that will actually transfer, not the whole local library.
             sizes = engine.remote_sizes()
             engine.build_queue(sizes)
+            engine.check_space()
+            # Live write-probe before we promise the UI a transfer is possible.
+            # Never report a storage as writable without actually testing it.
+            self.storage_manager.probe_writable(dest_norm, serial=self.selected_device.serial)
             return engine
 
         self._run_background(_work, self._on_plan_done)
@@ -256,7 +277,18 @@ class Controller(QObject):
         self._save()
 
     def shutdown(self) -> None:
+        """Gracefully stop background work on app close.
+
+        Cancels any active transfer and blocks until the running worker
+        finishes its current file. The active `adb push` is allowed to
+        complete before exit — we never destroy a running QThread
+        (would raise ``QThread: Destroyed while thread is still running``).
+        """
         if self.engine is not None:
             self.engine.cancel()
         if self._worker is not None and self._worker.isRunning():
-            self._worker.wait(2000)
+            # Wait for the worker to finish the in-flight file and observe
+            # the cancel flag. Worker exits *between* files, so this is
+            # bounded by one push duration, not the whole queue.
+            self._worker.wait()
+            self._worker.quit()

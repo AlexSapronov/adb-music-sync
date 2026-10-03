@@ -98,7 +98,7 @@ pre-commit install
 powershell -ExecutionPolicy Bypass -File build.ps1
 ```
 
-Скрипт создаёт standalone `.exe` (PyInstaller, onefile, windowed) и portable-архив `adb-music-sync-0.1.0-windows.zip`.
+Скрипт создаёт standalone `.exe` (PyInstaller, onefile, windowed) и portable-архив `adb-music-sync-0.1.1-windows.zip`.
 
 В portable-сборке папка `platform-tools/` пуста — положите туда `adb.exe` (и сопутствующие файлы) из официального [Android platform-tools](https://developer.android.com/tools/releases/platform-tools), либо убедитесь, что `adb` есть в `PATH`.
 
@@ -109,6 +109,7 @@ powershell -ExecutionPolicy Bypass -File build.ps1
 - Пауза останавливает очередь между файлами (активный `adb push` не прерывается мгновенно); точный посекундный прогресс одного файла не гарантирован.
 - Нет ADB over Wi-Fi, автообновлений, зеркальной синхронизации и удаления файлов (осознанно).
 - Определение съёмных накопителей зависит от прошивки; на некоторых ROM список томов может отличаться.
+- Shell-quoting (пути с `'`, `"`, `&`, `#`, `$`, backticks, Unicode) проверяется unit-тестами через единый POSIX-quoting helper; окончательная проверка на реальной Android shell зависит от конкретного устройства и прошивки.
 
 ## Лицензия
 

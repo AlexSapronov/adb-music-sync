@@ -26,7 +26,15 @@ from .paths import join_rel
 
 @dataclass
 class TransferProgress:
+    """Progress counters. ``total_files`` is the size of the transfer queue
+    (files actually needing transfer); ``transferred_files`` is the count that
+    finished successfully so far; ``current_index`` is the 1-based position of
+    the file currently being processed (for ``N / total`` display)."""
+
+    total_files: int = 0
     transferred_files: int = 0
+    skipped_files: int = 0
+    error_files: int = 0
     transferred_bytes: int = 0
     current_file: str = ""
     current_index: int = 0
@@ -42,11 +50,15 @@ class TransferEngine:
 
     # mutable runtime state
     state: AppState = AppState.READY
-    _pause_event: threading.Event = field(default_factory=threading.Event)
+    _run_gate: threading.Event = field(default_factory=threading.Event)
     _cancel_event: threading.Event = field(default_factory=threading.Event)
     _progress: TransferProgress = field(default_factory=TransferProgress)
     _current_item: TransferItem | None = None
     _raise_on_done: Exception | None = None
+
+    def __post_init__(self) -> None:
+        # Run gate starts OPEN: the queue runs until pause() clears it.
+        self._run_gate.set()
 
     # -- plan building (pure-ish, unit-testable) ---------------------------
     def build_queue(self, remote_sizes: dict[str, int | None]) -> list[TransferItem]:
@@ -97,13 +109,17 @@ class TransferEngine:
             self._progress.transferred_files += 1
             self._progress.transferred_bytes += item.source.size
         except (DeviceDisconnectedError, DeviceOfflineError, StorageUnavailableError):
-            # Queue-stopping conditions: propagate unchanged.
-            item.status = TransferStatus.ERROR
-            item.error = "device or storage unavailable"
+            # Queue-stopping conditions: propagate unchanged. The file was NOT
+            # transferred and is NOT corrupted — return it to PENDING so a
+            # resumed queue retries it. Clean up any partial .part first.
+            item.status = TransferStatus.PENDING
+            item.error = None
+            self._cleanup_part(part)
             raise
         except Exception as exc:  # per-file failure: wrap, let queue continue
             item.status = TransferStatus.ERROR
             item.error = str(exc)
+            self._progress.error_files += 1
             self._cleanup_part(part)
             raise TransferError(f"transfer failed for {item.remote_rel}: {exc}") from exc
 
@@ -117,21 +133,26 @@ class TransferEngine:
     def run(self, on_item_done=None) -> None:
         """Run the queue. May raise DeviceDisconnectedError/StorageUnavailableError
         to signal a stop-the-queue condition; per-file errors are tolerated."""
-        self._pause_event = threading.Event()
-        self._cancel_event = threading.Event()
+        self._run_gate.set()
+        self._cancel_event.clear()
         self.state = AppState.TRANSFERRING
         queued = [i for i in self.plan.items if i.status is TransferStatus.PENDING]
-        self.check_space()
+        self._progress.total_files = len(queued)
+        self._progress.skipped_files = sum(
+            1 for i in self.plan.items if i.status is TransferStatus.SKIPPED
+        )
 
         try:
             for idx, item in enumerate(queued, start=1):
                 self._progress.current_index = idx
                 self._ensure_not_disconnected()
 
-                # pause gate
-                while self._pause_event.is_set() and not self._cancel_event.is_set():
+                # Pause gate: block (no CPU spin) while the run gate is CLOSED.
+                # cancel() opens the gate AND sets the cancel flag, so cancel
+                # also works while paused.
+                while not self._run_gate.is_set():
                     self.state = AppState.PAUSED
-                    self._pause_event.wait(0.2)
+                    self._run_gate.wait(0.2)
                 if self._cancel_event.is_set():
                     self.state = AppState.CANCELLING
                     break
@@ -157,20 +178,21 @@ class TransferEngine:
         except StorageUnavailableError:
             self.state = AppState.DISCONNECTED
             raise
-        finally:
-            pass
 
     def _error_count(self) -> int:
         return sum(1 for i in self.plan.items if i.status is TransferStatus.ERROR)
 
     def pause(self) -> None:
-        self._pause_event.set()
+        self._run_gate.clear()
 
     def resume(self) -> None:
-        self._pause_event.clear()
+        self._run_gate.set()
 
     def cancel(self) -> None:
+        # Open the gate so a paused queue wakes and sees the cancel flag,
+        # then exits promptly. Works both while running and while paused.
         self._cancel_event.set()
+        self._run_gate.set()
 
     def _ensure_not_disconnected(self) -> None:
         # Fast-path: rely on `push`/`shell` raising on the next call.

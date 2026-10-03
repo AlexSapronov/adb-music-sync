@@ -32,15 +32,35 @@ from .models import Device, DeviceState
 
 # Keyword fragments used to classify a failed adb invocation. These are
 # normalized only here, once — not scattered across the project.
-_OFFLINE_MARKERS = ("offline", "device offline")
-_UNAUTHORIZED_MARKERS = ("unauthorized",)
+# Order matters: more specific (unauthorized, offline) come BEFORE the broad
+# disconnect markers, so a genuine "device offline" maps to Offline rather
+# than Disconnected.
+_UNAUTHORIZED_MARKERS = ("unauthorized", "adb_vendor_keys", "adb_keys")
+_OFFLINE_MARKERS = ("device offline", "offline")
 _DISCONNECT_MARKERS = (
     "no devices/emulators found",
-    "device offline",
     "device not found",
+    "not found",
     "failed to get feature set",
     "not a device",
+    "device disconnected",
+    "connection reset",
+    "broken pipe",
+    "remote closed the connection",
+    "closed",
 )
+
+
+def _posix_quote(path: str) -> str:
+    """Single-quote a string for an Android (POSIX) shell command.
+
+    This is the single, canonical quoting mechanism for every path/argument
+    the ADB layer hands to ``adb shell``. It escapes embedded single quotes
+    using the standard ``'\\''`` idiom, so names containing ``'``, spaces,
+    ``&``, ``#``, ``$``, backticks, parens, quotes and Unicode survive the
+    device-side shell intact.
+    """
+    return "'" + path.replace("'", "'\\''") + "'"
 
 
 def _find_adb() -> str:
@@ -128,12 +148,14 @@ class AdbClient:
 
     def _raise_for(self, r: CommandResult) -> None:
         blob = (r.stderr + " " + r.stdout).lower()
-        if any(m in blob for m in _DISCONNECT_MARKERS):
-            raise DeviceDisconnectedError(blob.strip() or "device disconnected")
-        if any(m in blob for m in _OFFLINE_MARKERS):
-            raise DeviceOfflineError(blob.strip() or "device offline")
+        # Specific states first, so "device offline" -> OfflineError and
+        # "unauthorized" -> UnauthorizedError, not the broad Disconnected.
         if any(m in blob for m in _UNAUTHORIZED_MARKERS):
             raise DeviceUnauthorizedError(blob.strip() or "device unauthorized")
+        if any(m in blob for m in _OFFLINE_MARKERS):
+            raise DeviceOfflineError(blob.strip() or "device offline")
+        if any(m in blob for m in _DISCONNECT_MARKERS):
+            raise DeviceDisconnectedError(blob.strip() or "device disconnected")
         raise AdbCommandError(blob.strip() or f"adb exited {r.returncode}")
 
     # -- device discovery --------------------------------------------------
@@ -182,22 +204,24 @@ class AdbClient:
         self._run_checked(["push", local, remote], serial=serial, timeout=3600.0)
 
     def shell_mkdir(self, path: str, *, serial: str | None = None) -> None:
-        self._run_checked(["shell", "mkdir", "-p", path], serial=serial)
+        self._run_checked(["shell", "mkdir", "-p", _posix_quote(path)], serial=serial)
 
     def shell_mv(self, src: str, dst: str, *, serial: str | None = None) -> None:
-        self._run_checked(["shell", "mv", src, dst], serial=serial)
+        self._run_checked(["shell", "mv", _posix_quote(src), _posix_quote(dst)], serial=serial)
 
     def shell_rm(self, path: str, *, serial: str | None = None) -> None:
         """Remove a single file (used only for our own .part files)."""
-        self._run_checked(["shell", "rm", "-f", path], serial=serial)
+        self._run_checked(["shell", "rm", "-f", _posix_quote(path)], serial=serial)
 
     def shell_stat_size(self, remote: str, *, serial: str | None = None) -> int | None:
         """Return remote file size in bytes, or None if it does not exist.
 
         Uses a portable `stat`-based probe that avoids relying on `ls -l`
-        column splitting (which breaks on spaces/Unicode).
+        column splitting (which breaks on spaces/Unicode). The path is
+        POSIX-quoted via :func:`_posix_quote` so `'`, `"`, `&`, `#`, `$`,
+        backticks, parens and Unicode survive the device shell intact.
         """
-        script = f'stat -c "%s" "{remote}" 2>/dev/null'
+        script = f"stat -c %s {_posix_quote(remote)} 2>/dev/null"
         out = self.shell_list(script, serial=serial).strip()
         if not out:
             return None
@@ -205,3 +229,7 @@ class AdbClient:
             return int(out.splitlines()[0])
         except ValueError:
             return None
+
+    def shell_touch(self, path: str, *, serial: str | None = None) -> None:
+        """Create an empty file at `path` (used only for write probes)."""
+        self._run_checked(["shell", "touch", _posix_quote(path)], serial=serial, timeout=30.0)

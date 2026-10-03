@@ -43,6 +43,7 @@ class FakeAdbClient(AdbClient):
         self.fail_next_push = False
         self.disconnect = False  # when True, every op raises DeviceDisconnectedError
         self.calls: list[list[str]] = []
+        self.read_only = False  # when True, touch/write ops fail (permission denied)
 
     # -- helpers for tests ------------------------------------------------
     @classmethod
@@ -172,6 +173,12 @@ class FakeAdbClient(AdbClient):
             self.removed.append(path)
             self.remote.pop(path, None)
             return CommandResult(0, "", "")
+        if sub == "touch":
+            if self.read_only:
+                return CommandResult(1, "", "Permission denied")
+            path = args[-1].strip("'")
+            self.remote[path] = 0  # empty probe file
+            return CommandResult(0, "", "")
         return CommandResult(0, "", "")
 
     @staticmethod
@@ -219,6 +226,7 @@ class FakeAdbClient(AdbClient):
         if self.disconnect:
             raise DeviceDisconnectedError("device disconnected")
         self.removed.append(path)
+        self.remote.pop(path, None)
 
     def list_devices(self):
         if self.disconnect:
