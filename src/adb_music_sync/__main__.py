@@ -1,13 +1,53 @@
-"""Entry point."""
+"""Entry point.
+
+Works both as ``python -m adb_music_sync`` and as a PyInstaller-frozen
+executable. The frozen .exe is built by pointing PyInstaller at this script
+directly (no package context), so we use ABSOLUTE imports here — a relative
+``from .gui import run`` breaks under PyInstaller with
+``ImportError: attempted relative import with no known parent package``.
+
+``adb-music-sync --smoke-test`` runs a headless runtime self-check (imports the
+core modules and verifies PySide6/Qt loads) and exits 0 on success, without
+opening a GUI or touching ADB. Used by CI to prove the final frozen artifact
+actually runs, not just that it was produced.
+"""
 
 from __future__ import annotations
 
 import sys
 
+_SMOKE_FLAG = "--smoke-test"
+
+
+def _smoke_test() -> int:
+    """Import the runtime surface and confirm a Qt app can be constructed."""
+    import adb_music_sync  # noqa: F401
+    import adb_music_sync.adb  # noqa: F401
+    import adb_music_sync.controller  # noqa: F401
+    import adb_music_sync.gui  # noqa: F401
+    import adb_music_sync.storage  # noqa: F401
+    import adb_music_sync.transfer  # noqa: F401
+
+    # Verify PySide6/Qt actually loads (proves plugins/runtime are bundled).
+    try:
+        from PySide6.QtCore import QCoreApplication
+
+        app = QCoreApplication.instance() or QCoreApplication(sys.argv[:1])
+        app.processEvents()
+    except Exception as exc:  # pragma: no cover - runtime env dependent
+        print(f"smoke-test FAILED: {exc}", file=sys.stderr)
+        return 1
+
+    print("smoke-test ok")
+    return 0
+
 
 def main() -> int:
+    if _SMOKE_FLAG in sys.argv[1:]:
+        return _smoke_test()
+
     # Import here so `python -m adb_music_sync` is cheap and GUI-free on import.
-    from .gui import run
+    from adb_music_sync.gui import run
 
     return run()
 
