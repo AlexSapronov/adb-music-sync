@@ -48,6 +48,9 @@ class FakeAdbClient(AdbClient):
         self.calls: list[list[str]] = []
         self.read_only = False  # when True, touch/write ops fail (permission denied)
         self.props: dict[str, str] = {}  # getprop key -> value (e.g. ro.serialno)
+        # Every _run() records its selector, so tests can assert transport-id
+        # vs serial routing for the whole runtime chain, not just discovery.
+        self.selectors: list = []  # each entry: AdbTarget | str(serial) | None
 
     # -- helpers for tests ------------------------------------------------
     @classmethod
@@ -105,6 +108,7 @@ class FakeAdbClient(AdbClient):
     # -- AdbClient interface overrides ------------------------------------
     def _run(self, args, *, serial=None, target=None, timeout=60.0) -> CommandResult:
         self.calls.append(list(args))
+        self.selectors.append(target if target is not None else serial)
         if self.disconnect:
             raise DeviceDisconnectedError("device disconnected")
         if self.offline:
@@ -229,8 +233,14 @@ class FakeAdbClient(AdbClient):
         if self.offline:
             raise DeviceOfflineError("device offline")
 
+    def _record_selector(self, target, serial):
+        # High-level overrides bypass _run(), so record the selector here too
+        # so tests can assert transport-id vs serial routing end-to-end.
+        self.selectors.append(target if target is not None else serial)
+
     def push(self, local, remote, *, serial=None, target=None):
         self._check_faults()
+        self._record_selector(target, serial)
         if self.fail_next_push:
             self.fail_next_push = False
             raise TransferError(f"push failed for {remote}")
@@ -239,10 +249,12 @@ class FakeAdbClient(AdbClient):
 
     def shell_stat_size(self, remote, *, serial=None, target=None):
         self._check_faults()
+        self._record_selector(target, serial)
         return self.remote.get(remote)
 
     def shell_mkdir(self, path, *, serial=None, target=None):
         self._check_faults()
+        self._record_selector(target, serial)
         if self.read_only:
             raise AdbCommandError(f"mkdir failed for {path}: Permission denied")
         self.mkdirs.append(path)
@@ -250,23 +262,27 @@ class FakeAdbClient(AdbClient):
 
     def shell_mv(self, src, dst, *, serial=None, target=None):
         self._check_faults()
+        self._record_selector(target, serial)
         self.moves.append((src, dst))
         if src in self.remote:
             self.remote[dst] = self.remote.pop(src)
 
     def shell_rm(self, path, *, serial=None, target=None):
         self._check_faults()
+        self._record_selector(target, serial)
         self.removed.append(path)
         self.remote.pop(path, None)
 
     def shell_touch(self, path, *, serial=None, target=None):
         self._check_faults()
+        self._record_selector(target, serial)
         if self.read_only:
             raise AdbCommandError(f"touch failed for {path}: Permission denied")
         self.remote[path] = 0
 
     def getprop(self, key, *, serial=None, target=None):
         self._check_faults()
+        self._record_selector(target, serial)
         return self.props.get(key, "")
 
     def list_devices(self):

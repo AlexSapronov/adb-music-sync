@@ -20,7 +20,14 @@ from .errors import (
     StorageUnavailableError,
     TransferError,
 )
-from .models import AppState, StorageTarget, TransferItem, TransferPlan, TransferStatus
+from .models import (
+    AdbTarget,
+    AppState,
+    StorageTarget,
+    TransferItem,
+    TransferPlan,
+    TransferStatus,
+)
 from .paths import join_rel
 
 
@@ -46,7 +53,7 @@ class TransferEngine:
     storage: StorageTarget
     destination: str
     plan: TransferPlan
-    serial: str
+    target: AdbTarget
 
     # mutable runtime state
     state: AppState = AppState.READY
@@ -83,7 +90,7 @@ class TransferEngine:
         sizes: dict[str, int | None] = {}
         for item in self.plan.items:
             remote = join_rel(self.destination, item.remote_rel)
-            sizes[item.remote_rel] = self.client.shell_stat_size(remote, serial=self.serial)
+            sizes[item.remote_rel] = self.client.shell_stat_size(remote, target=self.target)
         return sizes
 
     def check_space(self) -> None:
@@ -98,13 +105,13 @@ class TransferEngine:
         part = remote + ".part"
         parent = posixpath.dirname(remote)
 
-        self.client.shell_mkdir(parent, serial=self.serial)
+        self.client.shell_mkdir(parent, target=self.target)
         item.status = TransferStatus.TRANSFERRING
         self._progress.current_file = item.remote_rel
 
         try:
-            self.client.push(item.source.local_path, part, serial=self.serial)
-            self.client.shell_mv(part, remote, serial=self.serial)
+            self.client.push(item.source.local_path, part, target=self.target)
+            self.client.shell_mv(part, remote, target=self.target)
             item.status = TransferStatus.OK
             self._progress.transferred_files += 1
             self._progress.transferred_bytes += item.source.size
@@ -125,7 +132,7 @@ class TransferEngine:
 
     def _cleanup_part(self, part: str) -> None:
         try:
-            self.client.shell_rm(part, serial=self.serial)
+            self.client.shell_rm(part, target=self.target)
         except Exception:
             pass
 

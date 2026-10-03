@@ -11,6 +11,7 @@ from adb_music_sync.errors import (
     StorageUnavailableError,
 )
 from adb_music_sync.models import (
+    AdbTarget,
     AppState,
     LocalFileRef,
     StorageTarget,
@@ -34,7 +35,7 @@ def _engine(client, files=None, storage=None, dest="/storage/emulated/0/Music", 
         storage=storage,
         destination=dest,
         plan=TransferPlan(items=items),
-        serial=serial,
+        target=AdbTarget(serial=serial),
     )
 
 
@@ -111,7 +112,7 @@ def test_disconnect_during_transfer():
     # disconnect on second push
     orig_push = c.push
 
-    def flaky(local, remote, *, serial=None):
+    def flaky(local, remote, *, serial=None, target=None):
         if len(c.pushed) >= 1:
             raise DeviceDisconnectedError("device offline")
         orig_push(local, remote, serial=serial)
@@ -128,7 +129,7 @@ def test_sd_disappears_no_fallback():
     e = _engine(c, files=[("a.mp3", 1)], storage=storage)
 
     # simulate SD vanishing: stat/push raise StorageUnavailableError
-    def gone(local, remote, *, serial=None):
+    def gone(local, remote, *, serial=None, target=None):
         raise StorageUnavailableError(f"storage {remote} gone")
 
     c.push = gone

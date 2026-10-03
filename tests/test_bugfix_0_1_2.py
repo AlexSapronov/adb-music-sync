@@ -17,6 +17,7 @@ from adb_music_sync.errors import (
     StorageUnavailableError,
 )
 from adb_music_sync.models import (
+    AdbTarget,
     AppState,
     LocalFileRef,
     StorageTarget,
@@ -45,7 +46,7 @@ def _engine(client, rels, storage=None):
         storage=storage or _storage(),
         destination="/storage/A12B-34CD/Music",
         plan=plan,
-        serial="DEVICE1",
+        target=AdbTarget(serial="DEVICE1"),
     )
 
 
@@ -113,7 +114,7 @@ def test_offline_sets_disconnected_and_keeps_completed():
     # first push ok, second hits offline
     state = {"n": 0}
 
-    def fake_push(local, remote, *, serial=None):
+    def fake_push(local, remote, *, serial=None, target=None):
         state["n"] += 1
         if state["n"] == 2:
             raise DeviceOfflineError("device offline")
@@ -142,7 +143,7 @@ def test_offline_resume_completes_without_resending():
 
     pushes = {"a": 0, "b": 0}
 
-    def flaky_push(local, remote, *, serial=None):
+    def flaky_push(local, remote, *, serial=None, target=None):
         if remote.endswith("a.mp3.part"):
             pushes["a"] += 1
         if remote.endswith("b.mp3.part"):
@@ -152,7 +153,7 @@ def test_offline_resume_completes_without_resending():
         c.remote[remote] = 20
         return None
 
-    def ok_push(local, remote, *, serial=None):
+    def ok_push(local, remote, *, serial=None, target=None):
         if remote.endswith("a.mp3.part"):
             pushes["a"] += 1
         if remote.endswith("b.mp3.part"):
@@ -197,10 +198,10 @@ def test_cleanup_part_error_does_not_mask_original_exception():
     orig_push = c.push
     orig_rm = c.shell_rm
 
-    def bad_push(local, remote, *, serial=None):
+    def bad_push(local, remote, *, serial=None, target=None):
         raise DeviceDisconnectedError("device disconnected")
 
-    def bad_rm(path, *, serial=None):
+    def bad_rm(path, *, serial=None, target=None):
         raise DeviceDisconnectedError("still disconnected")
 
     c.push = bad_push
@@ -223,7 +224,7 @@ def test_transfer_one_renames_only_after_success():
 
     mv_calls = []
 
-    def record_mv(src, dst, *, serial=None):
+    def record_mv(src, dst, *, serial=None, target=None):
         mv_calls.append((src, dst))
         if src in c.remote:
             c.remote[dst] = c.remote.pop(src)
