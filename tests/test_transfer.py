@@ -149,7 +149,8 @@ def test_state_machine_transitions():
 def test_pause_resume():
     c = FakeAdbClient(remote={})
     e = _engine(c, files=[("a.mp3", 1)])
+    assert e._run_gate.is_set()  # gate open by default
     e.pause()
-    assert e._pause_event.is_set()
+    assert not e._run_gate.is_set()  # gate closed = paused
     e.resume()
-    assert not e._pause_event.is_set()
+    assert e._run_gate.is_set()
