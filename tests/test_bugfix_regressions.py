@@ -12,6 +12,7 @@ from adb_music_sync.errors import (
     StorageUnavailableError,
 )
 from adb_music_sync.models import (
+    AdbTarget,
     AppState,
     LocalFileRef,
     StorageTarget,
@@ -36,7 +37,7 @@ def _engine(client, files, storage=None, dest="/storage/emulated/0/Music", seria
         storage=storage,
         destination=dest,
         plan=TransferPlan(items=items),
-        serial=serial,
+        target=AdbTarget(serial=serial),
     )
 
 
@@ -173,7 +174,7 @@ def test_disconnect_preserves_completed_files_and_destination():
     e = _engine(c, files=[("a.mp3", 1), ("b.mp3", 1), ("c.mp3", 1)])
     orig_push = c.push
 
-    def flaky(local, remote, *, serial=None):
+    def flaky(local, remote, *, serial=None, target=None):
         # disconnect on the THIRD push (after a and b succeed)
         if len(c.pushed) >= 2:
             raise DeviceDisconnectedError("device disconnected")
@@ -197,7 +198,7 @@ def test_resume_after_disconnect_does_not_retransfer_completed():
     e = _engine(c, files=[("a.mp3", 1), ("b.mp3", 1), ("c.mp3", 1)])
     orig_push = c.push
 
-    def flaky(local, remote, *, serial=None):
+    def flaky(local, remote, *, serial=None, target=None):
         if len(c.pushed) >= 2:
             raise DeviceDisconnectedError("device disconnected")
         orig_push(local, remote, serial=serial)
@@ -221,7 +222,7 @@ def test_sd_not_auto_swapped_to_internal_on_disconnect():
     storage = StorageTarget("/storage/A12B-34CD", "SD card", is_removable=True, free_bytes=10**9)
     e = _engine(c, files=[("a.mp3", 1)], storage=storage)
 
-    def gone(local, remote, *, serial=None):
+    def gone(local, remote, *, serial=None, target=None):
         raise StorageUnavailableError("storage gone")
 
     c.push = gone

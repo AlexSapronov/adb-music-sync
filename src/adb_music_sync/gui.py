@@ -272,7 +272,11 @@ class MainWindow(QMainWindow):
         s = AppState(state) if state else self.ctrl.state
         transferring = s in (AppState.TRANSFERRING, AppState.SCANNING)
         running = s is AppState.TRANSFERRING
-        self.start_btn.setEnabled(s in (AppState.READY, AppState.DISCONNECTED, AppState.FAILED))
+        # "Начать" is only meaningful once a transfer plan has been built
+        # successfully and a valid engine is armed (state == READY). During
+        # DISCONNECTED/FAILED there is no engine — keep it disabled so the user
+        # re-runs "Проверить" instead of hitting a silent `adb exited 1`.
+        self.start_btn.setEnabled(s is AppState.READY and self.ctrl.engine is not None)
         self.pause_btn.setEnabled(running)
         self.resume_btn.setEnabled(s is AppState.PAUSED)
         self.cancel_btn.setEnabled(running or s is AppState.PAUSED or s is AppState.CANCELLING)

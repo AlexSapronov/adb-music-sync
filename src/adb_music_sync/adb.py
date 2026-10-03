@@ -147,20 +147,45 @@ class AdbClient:
         r = self._run(args, serial=serial, target=target, timeout=timeout)
         if r.ok:
             return r
-        self._raise_for(r)
-        raise AdbCommandError(f"adb {' '.join(args)} failed")
+        self._raise_for(r, args, serial=serial, target=target)
+        sel = self._selector_desc(serial=serial, target=target)
+        raise AdbCommandError(
+            f"adb {' '.join(args)} failed{sel}: "
+            f"{(r.stderr or '').strip() or f'exit code {r.returncode}'}"
+        )
 
-    def _raise_for(self, r: CommandResult) -> None:
+    def _raise_for(
+        self,
+        r: CommandResult,
+        args: list[str] | None = None,
+        *,
+        serial: str | None = None,
+        target: AdbTarget | None = None,
+    ) -> None:
+        if args is None:
+            args = []
         blob = (r.stderr + " " + r.stdout).lower()
+        sel = self._selector_desc(serial=serial, target=target)
+        ctx = f"adb {' '.join(args)} failed{sel}"
         # Specific states first, so "device offline" -> OfflineError and
         # "unauthorized" -> UnauthorizedError, not the broad Disconnected.
         if any(m in blob for m in _UNAUTHORIZED_MARKERS):
-            raise DeviceUnauthorizedError(blob.strip() or "device unauthorized")
+            raise DeviceUnauthorizedError(f"{ctx}: {blob.strip() or 'device unauthorized'}")
         if any(m in blob for m in _OFFLINE_MARKERS):
-            raise DeviceOfflineError(blob.strip() or "device offline")
+            raise DeviceOfflineError(f"{ctx}: {blob.strip() or 'device offline'}")
         if any(m in blob for m in _DISCONNECT_MARKERS):
-            raise DeviceDisconnectedError(blob.strip() or "device disconnected")
-        raise AdbCommandError(blob.strip() or f"adb exited {r.returncode}")
+            raise DeviceDisconnectedError(f"{ctx}: {blob.strip() or 'device disconnected'}")
+        stderr = (r.stderr or "").strip()
+        detail = stderr or blob.strip() or f"exit code {r.returncode}"
+        raise AdbCommandError(f"{ctx}: {detail}")
+
+    @staticmethod
+    def _selector_desc(*, serial: str | None, target: AdbTarget | None) -> str:
+        if target is not None:
+            return f" [target: transport_id={target.transport_id or '-'} serial={target.serial or '-'}]"
+        if serial is not None:
+            return f" [serial: {serial}]"
+        return ""
 
     # -- device discovery --------------------------------------------------
     def list_devices(self) -> list[Device]:
@@ -283,7 +308,7 @@ class AdbClient:
         r = self._run(["shell", *shlex.split(command)], serial=serial, target=target, timeout=60.0)
         if r.ok:
             return r.stdout.rstrip("\n")
-        self._raise_for(r)
+        self._raise_for(r, ["shell", *shlex.split(command)], serial=serial, target=target)
         return ""
 
     # -- file transfer -----------------------------------------------------

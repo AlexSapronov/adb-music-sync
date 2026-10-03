@@ -264,6 +264,10 @@ class Controller(QObject):
     def build_plan_async(self, destination: str) -> None:
         if self.client is None or self.selected_device is None or self.selected_storage is None:
             return
+        # Invalidate any previous plan/engine the moment we start rebuilding —
+        # a failed build must not leave a stale READY engine the UI could act on.
+        self.engine = None
+        self.plan = None
         dest = destination or "Music"
 
         def _work():
@@ -279,7 +283,7 @@ class Controller(QObject):
                 storage=self.selected_storage,
                 destination=dest_norm,
                 plan=P(items=[]),
-                serial=self.selected_device.serial,
+                target=self.selected_device.selector,
             )
             # build full plan from scan
             items = [TransferItem(source=f, remote_rel=f.rel_path) for f in self.scan_result.files]
@@ -292,7 +296,7 @@ class Controller(QObject):
             engine.check_space()
             # Live write-probe before we promise the UI a transfer is possible.
             # Never report a storage as writable without actually testing it.
-            self.storage_manager.probe_writable(dest_norm, serial=self.selected_device.serial)
+            self.storage_manager.probe_writable(dest_norm, target=self.selected_device.selector)
             return engine
 
         self._run_background(_work, self._on_plan_done)
@@ -308,7 +312,12 @@ class Controller(QObject):
         if self.state in (AppState.TRANSFERRING, AppState.PAUSED):
             return  # guard against double-start
         if self.engine is None:
-            self.build_plan_async(destination)
+            # The UI keeps "Начать" disabled until a plan has been built and
+            # an engine exists (state == READY). If somehow invoked without an
+            # engine, do NOT silently rebuild: report and stay put — the user
+            # should press "Проверить" to (re)build the plan explicitly.
+            log.warning("start_transfer called with no engine — plan not built")
+            self.log_message.emit("План передачи не построен — нажмите «Проверить».")
             return
         self.set_state(AppState.TRANSFERRING)
         self._run_background(
@@ -406,6 +415,16 @@ class Controller(QObject):
             self.set_state(AppState.DISCONNECTED)
         else:
             self.set_state(AppState.FAILED)
+        self.engine = None
+        # Diagnostic context: which device selector was being used when it failed.
+        sel = self.selected_device.selector if self.selected_device else None
+        if sel is not None:
+            log.error(
+                "operation failed (target transport_id=%s serial=%s): %s",
+                sel.transport_id,
+                sel.serial,
+                exc,
+            )
         self.log_message.emit(str(exc))
 
     def _save(self) -> None:
