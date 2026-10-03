@@ -8,7 +8,9 @@ from __future__ import annotations
 
 from adb_music_sync.adb import AdbClient, CommandResult
 from adb_music_sync.errors import (
+    AdbCommandError,
     DeviceDisconnectedError,
+    DeviceOfflineError,
     TransferError,
 )
 from adb_music_sync.models import Device, DeviceState
@@ -42,6 +44,7 @@ class FakeAdbClient(AdbClient):
         self.removed: list[str] = []
         self.fail_next_push = False
         self.disconnect = False  # when True, every op raises DeviceDisconnectedError
+        self.offline = False  # when True, every op raises DeviceOfflineError
         self.calls: list[list[str]] = []
         self.read_only = False  # when True, touch/write ops fail (permission denied)
 
@@ -196,39 +199,43 @@ class FakeAdbClient(AdbClient):
         toks = [t for t in parts if not t.startswith("-") and t != "%s"]
         return toks[-1] if toks else raw
 
-    # -- override high-level to respect disconnect -------------------------
-    def push(self, local, remote, *, serial=None):
+    # -- override high-level to respect disconnect/offline/read_only ----------
+    def _check_faults(self):
         if self.disconnect:
             raise DeviceDisconnectedError("device disconnected")
+        if self.offline:
+            raise DeviceOfflineError("device offline")
+
+    def push(self, local, remote, *, serial=None):
+        self._check_faults()
         if self.fail_next_push:
             self.fail_next_push = False
             raise TransferError(f"push failed for {remote}")
         self.pushed.append((local, remote))
+        self.remote[remote] = 0
 
     def shell_stat_size(self, remote, *, serial=None):
-        if self.disconnect:
-            raise DeviceDisconnectedError("device disconnected")
+        self._check_faults()
         return self.remote.get(remote)
 
     def shell_mkdir(self, path, *, serial=None):
-        if self.disconnect:
-            raise DeviceDisconnectedError("device disconnected")
+        self._check_faults()
+        if self.read_only:
+            raise AdbCommandError(f"mkdir failed for {path}: Permission denied")
         self.mkdirs.append(path)
+        self.remote.setdefault(path, None)
 
     def shell_mv(self, src, dst, *, serial=None):
-        if self.disconnect:
-            raise DeviceDisconnectedError("device disconnected")
+        self._check_faults()
         self.moves.append((src, dst))
         if src in self.remote:
             self.remote[dst] = self.remote.pop(src)
 
     def shell_rm(self, path, *, serial=None):
-        if self.disconnect:
-            raise DeviceDisconnectedError("device disconnected")
+        self._check_faults()
         self.removed.append(path)
         self.remote.pop(path, None)
 
     def list_devices(self):
-        if self.disconnect:
-            raise DeviceDisconnectedError("device disconnected")
+        self._check_faults()
         return list(self.devices)
