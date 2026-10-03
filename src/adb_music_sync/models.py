@@ -25,17 +25,19 @@ class Device:
 
 @dataclass
 class StorageTarget:
-    """A writable storage volume on the Android device."""
+    """A storage volume on the Android device.
+
+    ``writable`` is intentionally NOT a property of this model: writability is
+    a device state that can change mid-session and must be probed live via the
+    AdbClient (see ``StorageManager.probe_writable``). Reporting a storage as
+    writable without probing would be a lie.
+    """
 
     mount_path: str  # e.g. /storage/emulated/0 or /storage/A12B-34CD
     label: str  # human-readable: "Internal storage" / "SD card"
     is_removable: bool = False
     free_bytes: int = 0
     total_bytes: int = 0
-
-    @property
-    def writable(self) -> bool:
-        return self.free_bytes > 0 or True  # determined at check time, not here
 
 
 class AppState(str, Enum):

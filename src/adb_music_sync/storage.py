@@ -8,10 +8,16 @@ an alias of internal storage, NOT a physical SD card.
 from __future__ import annotations
 
 import re
+import uuid
 from dataclasses import dataclass
 
-from .adb import AdbClient
-from .errors import StorageUnavailableError
+from .adb import AdbClient, _posix_quote
+from .errors import (
+    AdbError,
+    DeviceDisconnectedError,
+    DeviceOfflineError,
+    StorageUnavailableError,
+)
 from .models import StorageTarget
 
 # Physical SD cards on modern Android mount at /storage/<UUID> (e.g. A12B-34CD).
@@ -97,7 +103,7 @@ class StorageManager:
         )
 
     def _free_space(self, serial: str, mp: str) -> tuple[int, int]:
-        out = self.client.shell_list(f"df -k {_sh_single(mp)}", serial=serial)
+        out = self.client.shell_list(f"df -k {_posix_quote(mp)}", serial=serial)
         parsed = _parse_df_kb(out)
         if parsed is None:
             # fall back to statvfs-like via toybox `df` long form
@@ -124,6 +130,32 @@ class StorageManager:
             if s.mount_path == storage.mount_path:
                 return s
         raise StorageUnavailableError(f"storage {storage.mount_path} is no longer available")
+
+    def probe_writable(self, destination: str, serial: str) -> None:
+        """Verify the destination directory actually accepts writes.
+
+        Creates a uniquely-named empty file inside `destination` and removes
+        it immediately. Raises :class:`StorageUnavailableError` on any
+        failure (read-only mount, vanished SD card, permission denied, ...),
+        only ever touching a probe file this application created.
+        """
+        probe_name = f".adb-music-sync-write-test-{uuid.uuid4().hex}"
+        probe_path = f"{destination.rstrip('/')}/{probe_name}"
+        try:
+            self.client.shell_touch(probe_path, serial=serial)
+        except (DeviceDisconnectedError, DeviceOfflineError):
+            # transport/device state, not a writability verdict — propagate as-is
+            raise
+        except AdbError as exc:
+            raise StorageUnavailableError(
+                f"destination {destination} is not writable: {exc}"
+            ) from exc
+        finally:
+            # Always attempt cleanup; the probe file is ours alone.
+            try:
+                self.client.shell_rm(probe_path, serial=serial)
+            except Exception:
+                pass
 
 
 # -- parsing helpers (pure functions, unit-testable) ------------------------
@@ -193,16 +225,6 @@ def _parse_df_kb(out: str) -> tuple[int, int] | None:
     total_1k = numbers[0]
     avail_1k = numbers[2]
     return avail_1k * 1024, total_1k * 1024
-
-
-def _sh_single(path: str) -> str:
-    """Single-quote a path for use inside an already-array-bound shell command.
-
-    The command string is passed as ONE argv element to `adb shell`, so we
-    only need to protect against the device shell expanding the path. We use
-    single quotes and escape embedded single quotes.
-    """
-    return "'" + path.replace("'", "'\\''") + "'"
 
 
 def _dedupe(items: list[str]) -> list[str]:
