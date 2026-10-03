@@ -32,11 +32,13 @@ if (-not (Test-Path $Exe)) {
 Write-Host "==> Built $Exe"
 
 # 3. Frozen smoke test — prove the .exe really runs (imports + Qt), not just
-#    that PyInstaller produced a file. Must exit 0.
+#    that PyInstaller produced a file. Must exit 0. Start-Process -Wait is
+#    required because a --windowed (GUI-subsystem) exe is launched
+#    asynchronously by `&` and $LASTEXITCODE stays empty.
 Write-Host "==> Running frozen smoke test"
-& $Exe --smoke-test
-if ($LASTEXITCODE -ne 0) {
-    throw "Frozen smoke test failed with exit code $LASTEXITCODE"
+$p = Start-Process -FilePath $Exe -ArgumentList "--smoke-test" -Wait -PassThru
+if ($p.ExitCode -ne 0) {
+    throw "Frozen smoke test failed with exit code $($p.ExitCode)"
 }
 Write-Host "==> Frozen smoke test ok"
 

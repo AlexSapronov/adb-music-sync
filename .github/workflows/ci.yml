@@ -51,10 +51,8 @@ jobs:
       - name: Frozen smoke test
         shell: powershell
         run: |
-          $out = & dist\adb-music-sync.exe --smoke-test 2>&1
-          $code = $LASTEXITCODE
-          Write-Host $out
-          if ($code -ne 0) { throw "frozen smoke test failed with exit code $code" }
+          $p = Start-Process -FilePath dist\adb-music-sync.exe -ArgumentList "--smoke-test" -Wait -PassThru
+          if ($p.ExitCode -ne 0) { throw "frozen smoke test failed with exit code $($p.ExitCode)" }
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4

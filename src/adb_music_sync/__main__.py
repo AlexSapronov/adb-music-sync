@@ -20,7 +20,15 @@ _SMOKE_FLAG = "--smoke-test"
 
 
 def _smoke_test() -> int:
-    """Import the runtime surface and confirm a Qt app can be constructed."""
+    """Import the runtime surface and confirm a Qt app can be constructed.
+
+    A --windowed frozen exe has sys.stdout == None, so we must not rely on
+    print: a bare print would crash before returning. The result is conveyed
+    purely by the exit code (0 = ok).
+    """
+    # Verify PySide6/Qt actually loads (proves plugins/runtime are bundled).
+    from PySide6.QtCore import QCoreApplication
+
     import adb_music_sync  # noqa: F401
     import adb_music_sync.adb  # noqa: F401
     import adb_music_sync.controller  # noqa: F401
@@ -28,18 +36,12 @@ def _smoke_test() -> int:
     import adb_music_sync.storage  # noqa: F401
     import adb_music_sync.transfer  # noqa: F401
 
-    # Verify PySide6/Qt actually loads (proves plugins/runtime are bundled).
     try:
-        from PySide6.QtCore import QCoreApplication
-
-        app = QCoreApplication.instance() or QCoreApplication(sys.argv[:1])
+        app = QCoreApplication.instance() or QCoreApplication(sys.argv)
         app.processEvents()
-    except Exception as exc:  # pragma: no cover - runtime env dependent
-        print(f"smoke-test FAILED: {exc}", file=sys.stderr)
+        return 0
+    except Exception:
         return 1
-
-    print("smoke-test ok")
-    return 0
 
 
 def main() -> int:
