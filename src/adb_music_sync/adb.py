@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import shutil
 import subprocess
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -127,6 +128,7 @@ class AdbClient:
                 errors="replace",
                 timeout=timeout,
                 check=False,
+                creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0,
             )
         except FileNotFoundError as exc:
             raise AdbNotFoundError(f"adb not found: {self.adb_path}") from exc
@@ -379,6 +381,63 @@ class AdbClient:
         # Anything adb actually printed is a genuine failure — classify it.
         self._raise_for(r, ["shell", script], serial=serial, target=target)
         return None
+
+    def shell_stat_sizes(
+        self, remotes: list[str], *, serial: str | None = None, target: AdbTarget | None = None
+    ) -> dict[str, int | None]:
+        """Probe up to 100 paths per invocation, with a bounded Windows command line.
+
+        Numeric row IDs keep filenames (even embedded newlines) out of the
+        response protocol. A failed remote stat produces '-', while ADB
+        failures and incomplete/malformed responses still stop plan building.
+        """
+        sizes: dict[str, int | None] = {}
+        batch: list[str] = []
+        fragments: list[str] = []
+
+        def flush() -> None:
+            if not batch:
+                return
+            script = "".join(fragments)
+            r = self._run_checked(["shell", script], serial=serial, target=target)
+            rows = r.stdout.splitlines()
+            if len(rows) != len(batch):
+                raise AdbCommandError("incomplete batched stat response")
+            for index, (path, row) in enumerate(zip(batch, rows, strict=True)):
+                key, sep, value = row.partition(":")
+                if key != str(index) or not sep or (value != "-" and not value.isdecimal()):
+                    raise AdbCommandError("invalid batched stat response")
+                sizes[path] = None if value == "-" else int(value)
+            batch.clear()
+            fragments.clear()
+
+        for remote in remotes:
+            if "\x00" in remote:
+                raise AdbCommandError("remote path contains a NUL byte")
+            if len(batch) == 100:
+                flush()
+            fragment = (
+                f"s=$(stat -c %s {_posix_quote(remote)} 2>/dev/null) || s=-; "
+                f"printf '{len(batch)}:%s\\n' \"$s\";"
+            )
+            # Include Python's Windows argv escaping and UTF-16 code units.
+            selector = target.args() if target is not None else (["-s", serial] if serial else [])
+            cmdline = subprocess.list2cmdline(
+                [self.adb_path, *selector, "shell", "".join(fragments) + fragment]
+            )
+            if len(cmdline.encode("utf-16-le")) // 2 > 24000:
+                flush()
+                fragment = (
+                    f"s=$(stat -c %s {_posix_quote(remote)} 2>/dev/null) || s=-; "
+                    "printf '0:%s\\n' \"$s\";"
+                )
+                cmdline = subprocess.list2cmdline([self.adb_path, *selector, "shell", fragment])
+                if len(cmdline.encode("utf-16-le")) // 2 > 24000:
+                    raise AdbCommandError("remote path exceeds batched stat command limit")
+            batch.append(remote)
+            fragments.append(fragment)
+        flush()
+        return sizes
 
     def shell_touch(
         self, path: str, *, serial: str | None = None, target: AdbTarget | None = None

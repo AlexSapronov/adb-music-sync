@@ -87,11 +87,12 @@ class TransferEngine:
 
     def remote_sizes(self) -> dict[str, int | None]:
         """Probe device sizes for every expected remote relative path."""
-        sizes: dict[str, int | None] = {}
-        for item in self.plan.items:
-            remote = join_rel(self.destination, item.remote_rel)
-            sizes[item.remote_rel] = self.client.shell_stat_size(remote, target=self.target)
-        return sizes
+        remotes = [join_rel(self.destination, item.remote_rel) for item in self.plan.items]
+        sizes = self.client.shell_stat_sizes(remotes, target=self.target)
+        return {
+            item.remote_rel: sizes[remote]
+            for item, remote in zip(self.plan.items, remotes, strict=True)
+        }
 
     def check_space(self) -> None:
         need = self.plan.to_transfer_bytes
