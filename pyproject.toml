@@ -1,0 +1,56 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "adb-music-sync"
+version = "0.1.0"
+description = "Reliable ADB-based music transfer from PC to Android devices"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "Alex Sapronov" }]
+dependencies = [
+    "PySide6==6.11.2",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest==9.1.1",
+    "pytest-cov==7.0.0",
+    "ruff==0.16.10",
+    "pyinstaller==6.16.0",
+]
+
+[project.scripts]
+adb-music-sync = "adb_music_sync.__main__:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra -q"
+markers = [
+    "device: tests that require a real Android device over ADB (excluded from CI)",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B"]
+ignore = ["E501"]
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+
+[tool.coverage.run]
+source = ["src/adb_music_sync"]
+omit = ["src/adb_music_sync/gui/*"]
+branch = true
+
+[tool.coverage.report]
+show_missing = true

@@ -1,0 +1,50 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+dist/
+build/
+*.spec.bak
+
+# Virtual envs
+.venv/
+venv/
+
+# Tooling caches
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+.ruff_cache/
+.mypy_cache/
+
+# IDE / editor
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS / user files
+.DS_Store
+Thumbs.db
+
+# App runtime artifacts
+logs/
+*.log
+*.part
+config.json
+config.json.tmp
+
+# Secrets
+*.key
+*.pem
+.env
+.env.*
+*.token
+
+# Build output
+release/
+*.zip
+*.exe
+platform-tools/
