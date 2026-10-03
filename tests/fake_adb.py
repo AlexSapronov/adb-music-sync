@@ -156,6 +156,14 @@ class FakeAdbClient(AdbClient):
         if sub == "df":
             mp = args[-1].strip("'") if args else ""
             text = self._df_map.get((mp, serial), None)
+            if text is None and serial is not None:
+                text = self._df_map.get((mp, None), None)
+            if text is None:
+                # fall back to any entry with the same mount path (target dispatch)
+                for (m, _s), t in self._df_map.items():
+                    if m == mp:
+                        text = t
+                        break
             if self._free_override is not None:
                 return CommandResult(0, self._free_override, "")
             if text is None:

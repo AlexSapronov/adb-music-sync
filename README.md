@@ -100,7 +100,7 @@ pre-commit install
 powershell -ExecutionPolicy Bypass -File build.ps1
 ```
 
-Скрипт создаёт standalone `.exe` (PyInstaller, onefile, windowed), затем запускает собранный `.exe` в режиме `--smoke-test` (импорт runtime-модулей + проверка загрузки PySide6, без GUI и без ADB), и только после успешного завершения собирает portable-архив `adb-music-sync-0.1.2-windows.zip`.
+Скрипт создаёт standalone `.exe` (PyInstaller, onefile, windowed), затем запускает собранный `.exe` в режиме `--smoke-test` (импорт runtime-модулей + проверка загрузки PySide6, без GUI и без ADB), и только после успешного завершения собирает portable-архив `adb-music-sync-0.1.3-windows.zip`.
 
 В portable-сборке папка `platform-tools/` пуста — положите туда `adb.exe` (и сопутствующие файлы) из официального [Android platform-tools](https://developer.android.com/tools/releases/platform-tools), либо убедитесь, что `adb` есть в `PATH`.
 
@@ -112,6 +112,24 @@ powershell -ExecutionPolicy Bypass -File build.ps1
 - Нет ADB over Wi-Fi, автообновлений, зеркальной синхронизации и удаления файлов (осознанно).
 - Определение съёмных накопителей зависит от прошивки; на некоторых ROM список томов может отличаться.
 - Shell-quoting (пути с `'`, `"`, `&`, `#`, `$`, backticks, Unicode) проверяется unit-тестами через единый POSIX-quoting helper; окончательная проверка на реальной Android shell зависит от конкретного устройства и прошивки.
+
+## Troubleshooting / Diagnostics
+
+Чтобы диагностировать проблемы с определением устройства или хранилищ на реальном Android-плеере (например, FiiO JM21), выполните следующие команды и приложите их вывод к баг-репорту:
+
+```
+adb devices -l
+adb shell getprop ro.product.model
+adb shell getprop ro.serialno
+adb shell ls -la /storage
+adb shell sm list-volumes
+adb shell df -k /storage/emulated/0
+```
+
+Ключевые моменты:
+
+- Устройство должно отображаться в `adb devices -l`. Некоторые плееры (FiiO) показывают host serial как `?`, но имеют рабочий `transport_id` — приложение обращается к ним через `adb -t <transport_id>`.
+- SD-карта определяется по строке `public ... mounted <name>` из `adb shell sm list-volumes` (например `external_sd`), а не только по UUID-имени (`A12B-34CD`).
 
 ## Лицензия
 
