@@ -18,7 +18,7 @@ from .errors import (
     DeviceOfflineError,
     StorageUnavailableError,
 )
-from .models import StorageTarget
+from .models import AdbTarget, StorageTarget
 
 # Physical SD cards mount at /storage/<NAME> where NAME is a UUID-style token
 # (A12B-34CD) OR a vendor-named mount (external_sd, sdcard1, extSdCard, ...).
@@ -40,7 +40,9 @@ _VENDOR_REMOVABLE_RE = re.compile(
 class StorageManager:
     client: AdbClient
 
-    def list_storages(self, serial: str | None = None, target: "AdbTarget | None" = None) -> list[StorageTarget]:
+    def list_storages(
+        self, serial: str | None = None, target: AdbTarget | None = None
+    ) -> list[StorageTarget]:
         """Return writable storage targets for a device (internal first).
 
         ``target`` (an :class:`AdbTarget`) selects the device for every
@@ -68,7 +70,7 @@ class StorageManager:
         return unique
 
     # -- discovery helpers -------------------------------------------------
-    def _discover_mounts(self, serial: str | None, target: "AdbTarget | None") -> "_VolumeSet":
+    def _discover_mounts(self, serial: str | None, target: AdbTarget | None) -> _VolumeSet:
         """Collect storage mount points.
 
         ``sm list-volumes`` is authoritative: a ``public ... mounted <name>``
@@ -91,7 +93,9 @@ class StorageManager:
             listing_out = ""
         fallback = _parse_storage_listing(listing_out)
 
-        internal = list(sm_internal) if sm_internal else ([_EMULATED_INTERNAL] if not fallback else [])
+        internal = (
+            list(sm_internal) if sm_internal else ([_EMULATED_INTERNAL] if not fallback else [])
+        )
         removable = list(sm_removable)
         if not removable and not sm_removable and fallback:
             # sm gave nothing useful — use the /storage fallback as SD candidates.
@@ -100,7 +104,7 @@ class StorageManager:
         return _VolumeSet(internal=_dedupe(internal), removable=_dedupe(removable))
 
     def _internal_storage(
-        self, serial: str | None, target: "AdbTarget | None", mounts: list[str]
+        self, serial: str | None, target: AdbTarget | None, mounts: list[str]
     ) -> StorageTarget | None:
         candidates = [m for m in mounts if m.startswith("/storage/emulated")]
         if not candidates:
@@ -115,7 +119,9 @@ class StorageManager:
             total_bytes=total,
         )
 
-    def _removable_storage(self, serial: str | None, target: "AdbTarget | None", mp: str) -> StorageTarget:
+    def _removable_storage(
+        self, serial: str | None, target: AdbTarget | None, mp: str
+    ) -> StorageTarget:
         free, total = self._free_space(serial, target, mp)
         return StorageTarget(
             mount_path=mp,
@@ -125,14 +131,16 @@ class StorageManager:
             total_bytes=total,
         )
 
-    def _free_space(self, serial: str | None, target: "AdbTarget | None", mp: str) -> tuple[int, int]:
+    def _free_space(self, serial: str | None, target: AdbTarget | None, mp: str) -> tuple[int, int]:
         out = self.client.shell_list(f"df -k {_posix_quote(mp)}", serial=serial, target=target)
         parsed = _parse_df_kb(out)
         if parsed is None:
             return 0, 0
         return parsed
 
-    def ensure_still_available(self, storage: StorageTarget, serial: str | None = None, target: "AdbTarget | None" = None) -> StorageTarget:
+    def ensure_still_available(
+        self, storage: StorageTarget, serial: str | None = None, target: AdbTarget | None = None
+    ) -> StorageTarget:
         """Re-check a selected storage is still present.
 
         Raises :class:`StorageUnavailableError` if it vanished (e.g. SD
@@ -145,7 +153,9 @@ class StorageManager:
                 return s
         raise StorageUnavailableError(f"storage {storage.mount_path} is no longer available")
 
-    def probe_writable(self, destination: str, serial: str | None = None, target: "AdbTarget | None" = None) -> None:
+    def probe_writable(
+        self, destination: str, serial: str | None = None, target: AdbTarget | None = None
+    ) -> None:
         """Verify the destination directory actually accepts writes.
 
         Ensures `destination` exists (creating it if needed via the ADB layer),

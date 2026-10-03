@@ -221,7 +221,7 @@ class FakeAdbClient(AdbClient):
         if self.offline:
             raise DeviceOfflineError("device offline")
 
-    def push(self, local, remote, *, serial=None):
+    def push(self, local, remote, *, serial=None, target=None):
         self._check_faults()
         if self.fail_next_push:
             self.fail_next_push = False
@@ -229,27 +229,37 @@ class FakeAdbClient(AdbClient):
         self.pushed.append((local, remote))
         self.remote[remote] = 0
 
-    def shell_stat_size(self, remote, *, serial=None):
+    def shell_stat_size(self, remote, *, serial=None, target=None):
         self._check_faults()
         return self.remote.get(remote)
 
-    def shell_mkdir(self, path, *, serial=None):
+    def shell_mkdir(self, path, *, serial=None, target=None):
         self._check_faults()
         if self.read_only:
             raise AdbCommandError(f"mkdir failed for {path}: Permission denied")
         self.mkdirs.append(path)
         self.remote.setdefault(path, None)
 
-    def shell_mv(self, src, dst, *, serial=None):
+    def shell_mv(self, src, dst, *, serial=None, target=None):
         self._check_faults()
         self.moves.append((src, dst))
         if src in self.remote:
             self.remote[dst] = self.remote.pop(src)
 
-    def shell_rm(self, path, *, serial=None):
+    def shell_rm(self, path, *, serial=None, target=None):
         self._check_faults()
         self.removed.append(path)
         self.remote.pop(path, None)
+
+    def shell_touch(self, path, *, serial=None, target=None):
+        self._check_faults()
+        if self.read_only:
+            raise AdbCommandError(f"touch failed for {path}: Permission denied")
+        self.remote[path] = 0
+
+    def getprop(self, key, *, serial=None, target=None):
+        self._check_faults()
+        return self.props.get(key, "")
 
     def list_devices(self):
         self._check_faults()

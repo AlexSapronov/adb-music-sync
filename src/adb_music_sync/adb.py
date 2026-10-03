@@ -227,7 +227,9 @@ class AdbClient:
         except (TypeError, ValueError):
             return None
 
-    def getprop(self, key: str, *, serial: str | None = None, target: AdbTarget | None = None) -> str:
+    def getprop(
+        self, key: str, *, serial: str | None = None, target: AdbTarget | None = None
+    ) -> str:
         """Return ``getprop <key>`` (empty string if unset). Used for
         ``ro.serialno`` / ``ro.product.model`` to build a stable identity."""
         out = self.shell_list(f"getprop {key}", serial=serial, target=target)
@@ -254,11 +256,15 @@ class AdbClient:
             return f"transport-{device.transport_id}"
         return None
 
-    def wait_for_device(self, serial: str | None = None, target: AdbTarget | None = None, timeout: float = 30.0) -> None:
+    def wait_for_device(
+        self, serial: str | None = None, target: AdbTarget | None = None, timeout: float = 30.0
+    ) -> None:
         self._run_checked(["wait-for-device"], serial=serial, target=target, timeout=timeout)
 
     # -- shell / filesystem ------------------------------------------------
-    def shell(self, command: str, *, serial: str | None = None, target: AdbTarget | None = None) -> str:
+    def shell(
+        self, command: str, *, serial: str | None = None, target: AdbTarget | None = None
+    ) -> str:
         """Run a raw shell command on the device, returning stdout.
 
         `command` is split with shlex (single string) so quoting/Unicode is
@@ -269,7 +275,9 @@ class AdbClient:
         )
         return r.stdout.rstrip("\n")
 
-    def shell_list(self, command: str, *, serial: str | None = None, target: AdbTarget | None = None) -> str:
+    def shell_list(
+        self, command: str, *, serial: str | None = None, target: AdbTarget | None = None
+    ) -> str:
         """Tolerant variant: returns empty string on shell errors it can't
         normalize, still raising real device errors."""
         r = self._run(["shell", *shlex.split(command)], serial=serial, target=target, timeout=60.0)
@@ -279,20 +287,34 @@ class AdbClient:
         return ""
 
     # -- file transfer -----------------------------------------------------
-    def push(self, local: str, remote: str, *, serial: str | None = None, target: AdbTarget | None = None) -> None:
+    def push(
+        self, local: str, remote: str, *, serial: str | None = None, target: AdbTarget | None = None
+    ) -> None:
         self._run_checked(["push", local, remote], serial=serial, target=target, timeout=3600.0)
 
-    def shell_mkdir(self, path: str, *, serial: str | None = None, target: AdbTarget | None = None) -> None:
-        self._run_checked(["shell", "mkdir", "-p", _posix_quote(path)], serial=serial, target=target)
+    def shell_mkdir(
+        self, path: str, *, serial: str | None = None, target: AdbTarget | None = None
+    ) -> None:
+        self._run_checked(
+            ["shell", "mkdir", "-p", _posix_quote(path)], serial=serial, target=target
+        )
 
-    def shell_mv(self, src: str, dst: str, *, serial: str | None = None, target: AdbTarget | None = None) -> None:
-        self._run_checked(["shell", "mv", _posix_quote(src), _posix_quote(dst)], serial=serial, target=target)
+    def shell_mv(
+        self, src: str, dst: str, *, serial: str | None = None, target: AdbTarget | None = None
+    ) -> None:
+        self._run_checked(
+            ["shell", "mv", _posix_quote(src), _posix_quote(dst)], serial=serial, target=target
+        )
 
-    def shell_rm(self, path: str, *, serial: str | None = None, target: AdbTarget | None = None) -> None:
+    def shell_rm(
+        self, path: str, *, serial: str | None = None, target: AdbTarget | None = None
+    ) -> None:
         """Remove a single file (used only for our own .part files)."""
         self._run_checked(["shell", "rm", "-f", _posix_quote(path)], serial=serial, target=target)
 
-    def shell_stat_size(self, remote: str, *, serial: str | None = None, target: AdbTarget | None = None) -> int | None:
+    def shell_stat_size(
+        self, remote: str, *, serial: str | None = None, target: AdbTarget | None = None
+    ) -> int | None:
         """Return remote file size in bytes, or None if it does not exist.
 
         Uses a portable `stat`-based probe that avoids relying on `ls -l`
@@ -309,6 +331,10 @@ class AdbClient:
         except ValueError:
             return None
 
-    def shell_touch(self, path: str, *, serial: str | None = None, target: AdbTarget | None = None) -> None:
+    def shell_touch(
+        self, path: str, *, serial: str | None = None, target: AdbTarget | None = None
+    ) -> None:
         """Create an empty file at `path` (used only for write probes)."""
-        self._run_checked(["shell", "touch", _posix_quote(path)], serial=serial, target=target, timeout=30.0)
+        self._run_checked(
+            ["shell", "touch", _posix_quote(path)], serial=serial, target=target, timeout=30.0
+        )
