@@ -134,14 +134,20 @@ class StorageManager:
     def probe_writable(self, destination: str, serial: str) -> None:
         """Verify the destination directory actually accepts writes.
 
-        Creates a uniquely-named empty file inside `destination` and removes
-        it immediately. Raises :class:`StorageUnavailableError` on any
-        failure (read-only mount, vanished SD card, permission denied, ...),
-        only ever touching a probe file this application created.
+        Ensures `destination` exists (creating it if needed via the ADB layer),
+        then creates a uniquely-named empty file inside it and removes it.
+        Raises :class:`StorageUnavailableError` on a writability failure
+        (read-only mount, vanished SD card, permission denied, ...); transport
+        errors propagate as-is. Only ever touches paths this application owns
+        (the destination directory it may create, and the probe file).
         """
         probe_name = f".adb-music-sync-write-test-{uuid.uuid4().hex}"
         probe_path = f"{destination.rstrip('/')}/{probe_name}"
         try:
+            # The destination may not exist yet (a brand-new target folder the
+            # transfer itself would create). Create it first so the probe does
+            # not fail with "No such file or directory" on a healthy card.
+            self.client.shell_mkdir(destination, serial=serial)
             self.client.shell_touch(probe_path, serial=serial)
         except (DeviceDisconnectedError, DeviceOfflineError):
             # transport/device state, not a writability verdict — propagate as-is
@@ -151,7 +157,8 @@ class StorageManager:
                 f"destination {destination} is not writable: {exc}"
             ) from exc
         finally:
-            # Always attempt cleanup; the probe file is ours alone.
+            # Always attempt cleanup; the probe file is ours alone. Do NOT
+            # remove the destination directory we may have just created.
             try:
                 self.client.shell_rm(probe_path, serial=serial)
             except Exception:

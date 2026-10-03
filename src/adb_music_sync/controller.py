@@ -72,6 +72,7 @@ class Controller(QObject):
         self._worker: _WorkerThread | None = None
         self._engine_lock = threading.Lock()
         self._pending_destination: str | None = None
+        self._pending_continuation: callable | None = None
 
     # -- wiring ------------------------------------------------------------
     def _connect(self) -> None:
@@ -152,7 +153,13 @@ class Controller(QObject):
         if self._pending_destination is not None:
             dest = self._pending_destination
             self._pending_destination = None
-            self.build_plan_async(dest)
+            # Chain the next phase as a *deferred continuation*. At this point
+            # ```finished_ok`` has fired but the QThread may still report
+            # ``isRunning()``, so calling build_plan_async directly would hit
+            # the single-worker guard and silently drop the plan build. Deferring
+            # until `QThread.finished` guarantees a strictly sequential chain
+            # with no lost phase and no second concurrent worker.
+            self._pending_continuation = lambda: self.build_plan_async(dest)
         else:
             self.set_state(AppState.READY)
 
@@ -248,17 +255,34 @@ class Controller(QObject):
 
     # -- helpers -----------------------------------------------------------
     def _run_background(self, fn, on_done) -> None:
-        if self._worker is not None and self._worker.isRunning():
-            return
-        self._worker = _WorkerThread(fn, parent=self)
-        self._worker.finished_ok.connect(on_done)
-        self._worker.failed.connect(self._on_background_error)
-        self._worker.start()
+        if self._worker is not None:
+            return  # strictly one worker at a time — never overlap
+        worker = _WorkerThread(fn, parent=self)
+        worker.finished_ok.connect(on_done)
+        worker.failed.connect(self._on_background_error)
+        # `finished` fires only after the thread object has actually exited,
+        # sitting after `finished_ok`/`failed` in the event queue. This is the
+        # single place the worker clears itself, so the next phase can start.
+        worker.finished.connect(lambda _w=worker: self._on_worker_finished(_w))
+        self._worker = worker
+        worker.start()
+
+    def _on_worker_finished(self, worker: _WorkerThread) -> None:
+        if self._worker is worker:
+            self._worker = None
+        cont = self._pending_continuation
+        self._pending_continuation = None
+        if cont is not None:
+            cont()
 
     def _on_background_error(self, exc: Exception) -> None:
-        from .errors import DeviceDisconnectedError, StorageUnavailableError
+        from .errors import (
+            DeviceDisconnectedError,
+            DeviceOfflineError,
+            StorageUnavailableError,
+        )
 
-        if isinstance(exc, DeviceDisconnectedError):
+        if isinstance(exc, (DeviceDisconnectedError, DeviceOfflineError)):
             self.set_state(AppState.DISCONNECTED)
         elif isinstance(exc, StorageUnavailableError):
             self.set_state(AppState.DISCONNECTED)

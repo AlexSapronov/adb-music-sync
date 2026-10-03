@@ -48,8 +48,14 @@ jobs:
         run: |
           if (-not (Test-Path dist\adb-music-sync.exe)) { throw "exe not produced" }
 
+      - name: Frozen smoke test
+        shell: powershell
+        run: |
+          $p = Start-Process -FilePath dist\adb-music-sync.exe -ArgumentList "--smoke-test" -Wait -PassThru
+          if ($p.ExitCode -ne 0) { throw "frozen smoke test failed with exit code $($p.ExitCode)" }
+
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: adb-music-sync-0.1.1-windows
+          name: adb-music-sync-0.1.2-windows
           path: dist/adb-music-sync.exe

@@ -94,11 +94,13 @@ pre-commit install
 
 ## Сборка
 
+Рекомендуемая версия Python — **3.11** (совпадает с CI). Сборка на других версиях не проверяется.
+
 ```powershell
 powershell -ExecutionPolicy Bypass -File build.ps1
 ```
 
-Скрипт создаёт standalone `.exe` (PyInstaller, onefile, windowed) и portable-архив `adb-music-sync-0.1.1-windows.zip`.
+Скрипт создаёт standalone `.exe` (PyInstaller, onefile, windowed), затем запускает собранный `.exe` в режиме `--smoke-test` (импорт runtime-модулей + проверка загрузки PySide6, без GUI и без ADB), и только после успешного завершения собирает portable-архив `adb-music-sync-0.1.2-windows.zip`.
 
 В portable-сборке папка `platform-tools/` пуста — положите туда `adb.exe` (и сопутствующие файлы) из официального [Android platform-tools](https://developer.android.com/tools/releases/platform-tools), либо убедитесь, что `adb` есть в `PATH`.
 

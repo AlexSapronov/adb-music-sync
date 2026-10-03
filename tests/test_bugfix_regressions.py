@@ -95,8 +95,9 @@ def test_probe_writable_ok():
     c = FakeAdbClient.with_device()
     sm = StorageManager(c)
     sm.probe_writable("/storage/emulated/0/Music", serial="DEVICE1")
-    # probe file touched then removed; no lingering entry left on the device
-    assert c.remote == {}
+    # probe file touched then removed; the destination directory may now exist
+    # (created by mkdir) but no probe file lingers
+    assert not any("write-test" in p for p in c.remote)
     assert any("write-test" in p for p in c.removed)  # it was cleaned up
 
 

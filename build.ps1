@@ -4,7 +4,7 @@
 
 $ErrorActionPreference = "Stop"
 
-$Version = "0.1.1"
+$Version = "0.1.2"
 $AppName = "adb-music-sync"
 $DistDir = Join-Path $PSScriptRoot "dist"
 $BuildDir = Join-Path $PSScriptRoot "build"
@@ -31,7 +31,18 @@ if (-not (Test-Path $Exe)) {
 }
 Write-Host "==> Built $Exe"
 
-# 3. Assemble portable build (exe + platform-tools hint + README)
+# 3. Frozen smoke test — prove the .exe really runs (imports + Qt), not just
+#    that PyInstaller produced a file. Must exit 0. Start-Process -Wait is
+#    required because a --windowed (GUI-subsystem) exe is launched
+#    asynchronously by `&` and $LASTEXITCODE stays empty.
+Write-Host "==> Running frozen smoke test"
+$p = Start-Process -FilePath $Exe -ArgumentList "--smoke-test" -Wait -PassThru
+if ($p.ExitCode -ne 0) {
+    throw "Frozen smoke test failed with exit code $($p.ExitCode)"
+}
+Write-Host "==> Frozen smoke test ok"
+
+# 4. Assemble portable build (exe + platform-tools hint + README)
 $ReleaseDir = Join-Path $PSScriptRoot "release"
 $PortableDir = Join-Path $ReleaseDir "$AppName-$Version"
 New-Item -ItemType Directory -Force -Path $PortableDir | Out-Null
