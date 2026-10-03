@@ -156,7 +156,10 @@ def test_plan_build_450_missing_no_error(monkeypatch):
         for i in range(450)
     ]
     # every stat returns "missing" (exit 1, empty stderr)
-    responses = [CommandResult(1, "", "") for _ in items]
+    responses = [
+        CommandResult(0, "".join(f"{i}:-\n" for i in range(count)), "")
+        for count in [100, 100, 100, 100, 50]
+    ]
     engine, captured = _engine(monkeypatch, items, responses)
 
     sizes = engine.remote_sizes()
@@ -164,8 +167,8 @@ def test_plan_build_450_missing_no_error(monkeypatch):
     queued = engine.build_queue(sizes)
     assert len(queued) == 450
     assert all(i.status is TransferStatus.PENDING for i in queued)
-    # none of these raised AdbCommandError, and 450 stat probes were issued
-    assert len(captured) == 450
+    # Five batched shell invocations replace 450 separate adb processes.
+    assert len(captured) == 5
 
 
 def test_plan_build_mixed_scenario(monkeypatch):
@@ -177,9 +180,7 @@ def test_plan_build_mixed_scenario(monkeypatch):
 
     # a: same size (skip), b: missing (pending), c: wrong size (pending)
     responses = [
-        CommandResult(0, "1000\n", ""),  # a exists, same size
-        CommandResult(1, "", ""),  # b missing
-        CommandResult(0, "999\n", ""),  # c exists, different size
+        CommandResult(0, "0:1000\n1:-\n2:999\n", ""),
     ]
     engine, captured = _engine(monkeypatch, items, responses)
 
@@ -191,7 +192,7 @@ def test_plan_build_mixed_scenario(monkeypatch):
     assert by_rel["Album/b.flac"] is TransferStatus.PENDING
     assert by_rel["Album/c.flac"] is TransferStatus.PENDING
     assert len(queued) == 2
-    assert len(captured) == 3
+    assert len(captured) == 1
 
 
 def test_e2e_transfer_uses_target_with_spaces(monkeypatch):
@@ -204,7 +205,7 @@ def test_e2e_transfer_uses_target_with_spaces(monkeypatch):
     items = [TransferItem(source=src)]
     # probe says missing, then mkdir/push/mv all succeed
     responses = [
-        CommandResult(1, "", ""),  # stat -> missing
+        CommandResult(0, "0:-\n", ""),  # batched stat -> missing
         CommandResult(0, "", ""),  # mkdir -p
         CommandResult(0, "12345\n", ""),  # push (fake ok)
         CommandResult(0, "", ""),  # mv
@@ -229,8 +230,9 @@ def test_e2e_transfer_uses_target_with_spaces(monkeypatch):
     engine.transfer_one(items[0])
     # every device-side argv carried target selector (transport_id=1), and the
     # stat/mkdir args kept the spaceful path single-quoted
-    assert captured[0] == [
-        "shell",
-        f"stat -c %s {_posix_quote('/storage/external_sd/Music/2024-06-29 - Come Alive/01. Come Alive.flac')} 2>/dev/null",
-    ]
+    assert captured[0][0] == "shell"
+    assert (
+        _posix_quote("/storage/external_sd/Music/2024-06-29 - Come Alive/01. Come Alive.flac")
+        in captured[0][1]
+    )
     assert captured[1][0] == "shell" and "2024-06-29 - Come Alive" in captured[1][-1]

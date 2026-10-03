@@ -276,6 +276,11 @@ class FakeAdbClient(AdbClient):
         self._record_selector(target, serial)
         return self.remote.get(remote)
 
+    def shell_stat_sizes(self, remotes, *, serial=None, target=None):
+        self._check_faults()
+        self._record_selector(target, serial)
+        return {remote: self.remote.get(remote) for remote in remotes}
+
     def shell_mkdir(self, path, *, serial=None, target=None):
         self._check_faults()
         self._record_selector(target, serial)
