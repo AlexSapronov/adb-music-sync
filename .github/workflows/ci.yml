@@ -33,10 +33,7 @@ jobs:
       - name: Smoke import test
         run: python -c "import adb_music_sync.adb, adb_music_sync.storage, adb_music_sync.scanner, adb_music_sync.transfer, adb_music_sync.controller, adb_music_sync.models, adb_music_sync.errors, adb_music_sync.paths; print('imports ok')"
 
-      - name: Run tests (exclude device)
-        run: pytest -m "not device"
-
-      - name: Coverage
+      - name: Run tests with coverage (exclude device)
         run: pytest -m "not device" --cov=adb_music_sync --cov-report=term-missing --cov-report=xml
 
       - name: Windows build
@@ -54,5 +51,5 @@ jobs:
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: adb-music-sync-0.1.0-windows
+          name: adb-music-sync-0.1.1-windows
           path: dist/adb-music-sync.exe
