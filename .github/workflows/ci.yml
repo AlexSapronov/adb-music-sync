@@ -39,14 +39,16 @@ jobs:
       - name: Windows build
         shell: powershell
         run: |
-          # put a bogus adb under platform-tools so the build does not find a real one
-          New-Item -ItemType Directory -Force -Path platform-tools | Out-Null
-          python -m PyInstaller --noconfirm --clean --name adb-music-sync --onefile --windowed --collect-all PySide6 --paths src src\adb_music_sync\__main__.py
+          python -m PyInstaller --noconfirm --clean --name adb-music-sync --onefile --windowed --paths src src\adb_music_sync\__main__.py
 
-      - name: Verify exe exists
+      - name: Verify EXE size
         shell: powershell
         run: |
-          if (-not (Test-Path dist\adb-music-sync.exe)) { throw "exe not produced" }
+          $exe = Get-Item dist\adb-music-sync.exe
+          $sizeMiB = [math]::Round($exe.Length / 1MB, 2)
+          Write-Host "EXE size: $sizeMiB MiB ($($exe.Length) bytes)"
+          "EXE size: **$sizeMiB MiB** ($($exe.Length) bytes)" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append
+          if ($exe.Length -gt 80MB) { throw "EXE exceeds the 80 MiB size budget" }
 
       - name: Frozen smoke test
         shell: powershell
