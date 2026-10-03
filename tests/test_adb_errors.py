@@ -119,14 +119,15 @@ def test_shell_command_shapes_use_quote_helper(monkeypatch):
 def test_shell_stat_size_quotes_path(monkeypatch):
     captured = {}
 
-    def fake_shell_list(script, *, serial=None, target=None):
-        captured["script"] = script
-        return "123\n"
+    def fake_run(args, *, serial=None, target=None, timeout=60.0):
+        captured["args"] = list(args)
+        return CommandResult(0, "123\n", "")
 
     c = AdbClient(adb_path="/fake/adb")
-    monkeypatch.setattr(c, "shell_list", fake_shell_list)
+    monkeypatch.setattr(c, "_run", fake_run)
 
     tricky = '/Music/It\'s "Title" & #1.flac'
     assert c.shell_stat_size(tricky) == 123
-    # the path must be single-quoted inside the stat script
-    assert _posix_quote(tricky) in captured["script"]
+    # the whole script must go as a SINGLE arg after `shell`, with the path
+    # single-quoted so Android's shell keeps it intact
+    assert captured["args"] == ["shell", f"stat -c %s {_posix_quote(tricky)} 2>/dev/null"]

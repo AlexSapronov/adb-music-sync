@@ -149,16 +149,24 @@ class FakeAdbClient(AdbClient):
     def _fake_shell(self, args, serial, timeout) -> CommandResult:
         if not args:
             return CommandResult(0, "", "")
-        sub = args[0]
+        # The real command-building layer passes shell commands either as a
+        # single verbatim string (`shell_list`/`shell`/`shell_stat_size`) or as
+        # tokenized argv (`mkdir`/`mv`/`rm`/`touch`). Normalize both to a raw
+        # command string, then parse it the way Android's mksh would: single
+        # quotes group their contents, `2>/dev/null` is a redirection.
+        if isinstance(args, list):
+            raw_cmd = " ".join(args)
+        else:
+            raw_cmd = str(args)
+        sub = raw_cmd.split()[0] if raw_cmd.split() else ""
         if sub == "sm":
             return CommandResult(0, self.sm_volumes, "")
         if sub == "ls":
-            target = args[1] if len(args) > 1 else ""
-            if target == "/storage":
+            if "/storage" in raw_cmd:
                 return CommandResult(0, self.storage_listing, "")
             return CommandResult(0, "", "")
         if sub == "df":
-            mp = args[-1].strip("'") if args else ""
+            mp = self._last_quoted_or_token(raw_cmd)
             text = self._df_map.get((mp, serial), None)
             if text is None and serial is not None:
                 text = self._df_map.get((mp, None), None)
@@ -171,45 +179,61 @@ class FakeAdbClient(AdbClient):
             if self._free_override is not None:
                 return CommandResult(0, self._free_override, "")
             if text is None:
-                # derive from remote/dflt
                 return CommandResult(
                     0, "Filesystem 1K-blocks Used Available Use% M\n/dev/x 0 0 0 0% /\n", ""
                 )
             return CommandResult(0, text, "")
         if sub == "getprop":
-            key = args[1] if len(args) > 1 else ""
+            toks = raw_cmd.split()
+            key = toks[1] if len(toks) > 1 else ""
             return CommandResult(0, self.props.get(key, ""), "")
         if sub == "stat":
-            # stat -c "%s" "path"
-            raw = " ".join(args[1:])
-            path = self._extract_quoted(raw)
+            path = self._last_quoted_or_token(raw_cmd)
             size = self.remote.get(path)
             if size is None:
-                return CommandResult(1, "", "No such file")
+                return CommandResult(1, "", "stat: No such file or directory")
             return CommandResult(0, str(size), "")
         if sub == "mkdir":
-            path = args[-1].strip("'") if args else ""
+            path = self._last_quoted_or_token(raw_cmd)
             self.mkdirs.append(path)
             return CommandResult(0, "", "")
         if sub == "mv":
-            src = args[1].strip("'")
-            dst = args[2].strip("'")
+            src, dst = self._two_quoted_or_tokens(raw_cmd)
             self.moves.append((src, dst))
             if src in self.remote:
                 self.remote[dst] = self.remote.pop(src)
             return CommandResult(0, "", "")
         if sub == "rm":
-            path = args[-1].strip("'")
+            path = self._last_quoted_or_token(raw_cmd)
             self.removed.append(path)
             self.remote.pop(path, None)
             return CommandResult(0, "", "")
         if sub == "touch":
             if self.read_only:
                 return CommandResult(1, "", "Permission denied")
-            path = args[-1].strip("'")
+            path = self._last_quoted_or_token(raw_cmd)
             self.remote[path] = 0  # empty probe file
             return CommandResult(0, "", "")
         return CommandResult(0, "", "")
+
+    @staticmethod
+    def _last_quoted_or_token(raw: str) -> str:
+        import re
+
+        quoted = re.findall(r"'([^']*)'", raw)
+        if quoted:
+            return quoted[-1]
+        return raw.split()[-1]
+
+    @staticmethod
+    def _two_quoted_or_tokens(raw: str) -> tuple[str, str]:
+        import re
+
+        quoted = re.findall(r"'([^']*)'", raw)
+        if len(quoted) >= 2:
+            return quoted[0], quoted[1]
+        toks = raw.split()
+        return toks[1], toks[2]
 
     @staticmethod
     def _extract_quoted(raw: str) -> str:

@@ -15,7 +15,6 @@ Design notes:
 
 from __future__ import annotations
 
-import shlex
 import shutil
 import subprocess
 from dataclasses import dataclass
@@ -292,23 +291,31 @@ class AdbClient:
     ) -> str:
         """Run a raw shell command on the device, returning stdout.
 
-        `command` is split with shlex (single string) so quoting/Unicode is
-        preserved; adb receives the command as separate argv tokens it joins.
+        `command` is passed to ``adb shell`` as a SINGLE argument so the
+        device-side shell receives it verbatim — POSIX quoting (from
+        :func:`_posix_quote`), shell operators (``&&``, ``2>/dev/null``) and
+        redirections survive. We must NOT shlex.split() here: Python's
+        host-side splitter strips the single quotes that are meant for the
+        Android shell.
         """
-        r = self._run_checked(
-            ["shell", *shlex.split(command)], serial=serial, target=target, timeout=60.0
-        )
+        r = self._run_checked(["shell", command], serial=serial, target=target, timeout=60.0)
         return r.stdout.rstrip("\n")
 
     def shell_list(
         self, command: str, *, serial: str | None = None, target: AdbTarget | None = None
     ) -> str:
-        """Tolerant variant: returns empty string on shell errors it can't
-        normalize, still raising real device errors."""
-        r = self._run(["shell", *shlex.split(command)], serial=serial, target=target, timeout=60.0)
+        """Tolerant variant: returns empty string on ORDINARY remote-shell
+        non-zero status, still raising real device errors (offline /
+        disconnected / unauthorized / transport failure).
+
+        A non-zero exit from `command` itself (e.g. `stat` on a missing file)
+        is NOT a device error; only ADB-level / transport-level failures raise
+        here. The command is passed to ``adb shell`` as a single argument so
+        device-side quoting survives (no host-side shlex split)."""
+        r = self._run(["shell", command], serial=serial, target=target, timeout=60.0)
         if r.ok:
             return r.stdout.rstrip("\n")
-        self._raise_for(r, ["shell", *shlex.split(command)], serial=serial, target=target)
+        self._raise_for(r, ["shell", command], serial=serial, target=target)
         return ""
 
     # -- file transfer -----------------------------------------------------
@@ -342,19 +349,36 @@ class AdbClient:
     ) -> int | None:
         """Return remote file size in bytes, or None if it does not exist.
 
-        Uses a portable `stat`-based probe that avoids relying on `ls -l`
-        column splitting (which breaks on spaces/Unicode). The path is
-        POSIX-quoted via :func:`_posix_quote` so `'`, `"`, `&`, `#`, `$`,
-        backticks, parens and Unicode survive the device shell intact.
+        A missing remote file is a *normal* probe outcome (used to decide
+        whether a track must be transferred), NOT an ADB error. So we run the
+        ``stat`` via the raw command layer and inspect the result directly:
+
+        * success + integer stdout  -> size;
+        * ordinary ``stat`` failure (file absent, exit != 0) -> None;
+        * genuine device/transport failure -> the matching typed exception.
+
+        The path is POSIX-quoted via :func:`_posix_quote` so `'`, `"`, `&`,
+        `#`, `$`, backticks, parens and Unicode survive the device shell.
         """
         script = f"stat -c %s {_posix_quote(remote)} 2>/dev/null"
-        out = self.shell_list(script, serial=serial, target=target).strip()
-        if not out:
+        r = self._run(["shell", script], serial=serial, target=target, timeout=60.0)
+        if r.ok:
+            out = r.stdout.strip()
+            if out:
+                try:
+                    return int(out.splitlines()[0])
+                except ValueError:
+                    return None
             return None
-        try:
-            return int(out.splitlines()[0])
-        except ValueError:
+        # Non-zero: distinguish "file simply doesn't exist" from a real
+        # device/transport failure. 2>/dev/null suppresses the stat error for
+        # a missing file, so empty output here => missing file => None.
+        blob = (r.stderr + " " + r.stdout).strip().lower()
+        if not blob:
             return None
+        # Anything adb actually printed is a genuine failure — classify it.
+        self._raise_for(r, ["shell", script], serial=serial, target=target)
+        return None
 
     def shell_touch(
         self, path: str, *, serial: str | None = None, target: AdbTarget | None = None
