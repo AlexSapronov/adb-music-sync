@@ -18,29 +18,46 @@ from .errors import (
     DeviceOfflineError,
     StorageUnavailableError,
 )
-from .models import StorageTarget
+from .models import AdbTarget, StorageTarget
 
-# Physical SD cards on modern Android mount at /storage/<UUID> (e.g. A12B-34CD).
+# Physical SD cards mount at /storage/<NAME> where NAME is a UUID-style token
+# (A12B-34CD) OR a vendor-named mount (external_sd, sdcard1, extSdCard, ...).
+# ``sm list-volumes`` is the authoritative source (public + mounted); this
+# regex is only a *fallback* heuristic for the `ls /storage` path.
 _SDCARD_RE = re.compile(r"^[0-9A-F]{4,}-[0-9A-F]{4,}$")
 _EMULATED_INTERNAL = "/storage/emulated/0"
+# Mount tokens we never treat as removable SD cards even in a fallback scan.
+_RESERVED_STORAGE_NAMES = frozenset({"emulated", "self", "sdcard0", "sdcard1", "sdcard"})
+# Additional clearly-vendor removable names accepted in the *fallback* only
+# (sm list-volumes already covers these authoritatively at runtime).
+_VENDOR_REMOVABLE_RE = re.compile(
+    r"^(external_sd|extsdcard|sd ?card|microsd|sdcard\d+|storage/sdcard\d+)$",
+    re.IGNORECASE,
+)
 
 
 @dataclass
 class StorageManager:
     client: AdbClient
 
-    def list_storages(self, serial: str) -> list[StorageTarget]:
-        """Return writable storage targets for a device (internal first)."""
-        mounts = self._discover_mounts(serial)
+    def list_storages(
+        self, serial: str | None = None, target: AdbTarget | None = None
+    ) -> list[StorageTarget]:
+        """Return writable storage targets for a device (internal first).
+
+        ``target`` (an :class:`AdbTarget`) selects the device for every
+        command; ``serial`` is kept only as a legacy convenience for the old
+        string-based callers and maps to ``-s <serial>``.
+        """
+        volumes = self._discover_mounts(serial=serial, target=target)
         storages: list[StorageTarget] = []
 
-        internal = self._internal_storage(serial, mounts)
+        internal = self._internal_storage(serial=serial, target=target, mounts=volumes.internal)
         if internal is not None:
             storages.append(internal)
 
-        for mp in mounts:
-            if self._is_removable(mp):
-                storages.append(self._removable_storage(serial, mp))
+        for mp in volumes.removable:
+            storages.append(self._removable_storage(serial=serial, target=target, mp=mp))
 
         # De-duplicate on mount path (defensive).
         seen: set[str] = set()
@@ -53,37 +70,47 @@ class StorageManager:
         return unique
 
     # -- discovery helpers -------------------------------------------------
-    def _discover_mounts(self, serial: str) -> list[str]:
-        """Collect candidate storage mount points from `sm list-volumes`."""
-        mounts: list[str] = []
+    def _discover_mounts(self, serial: str | None, target: AdbTarget | None) -> _VolumeSet:
+        """Collect storage mount points.
+
+        ``sm list-volumes`` is authoritative: a ``public ... mounted <name>``
+        volume is a physical removable card regardless of the name's shape
+        (UUID or vendor-named). It also authoritatively reports ``private``
+        and ``emulated`` volumes, which we exclude. On ROMs without `sm`,
+        fall back to scanning ``ls /storage`` with safe heuristics.
+        """
+        sm_out = ""
         try:
-            out = self.client.shell_list("sm list-volumes", serial=serial)
+            sm_out = self.client.shell_list("sm list-volumes", serial=serial, target=target)
         except Exception:  # some ROMs lack `sm`; fall back to /storage scan
-            out = ""
-        mounts.extend(_parse_sm_volumes(out))
+            sm_out = ""
+        sm_internal, sm_removable = _parse_sm_volumes(sm_out)
 
+        listing_out = ""
         try:
-            listing = self.client.shell_list("ls /storage", serial=serial)
+            listing_out = self.client.shell_list("ls /storage", serial=serial, target=target)
         except Exception:
-            listing = ""
-        mounts.extend(_parse_storage_listing(listing))
+            listing_out = ""
+        fallback = _parse_storage_listing(listing_out)
 
-        # Always include the canonical internal path if we found nothing.
-        if not mounts:
-            mounts.append(_EMULATED_INTERNAL)
-        return _dedupe(mounts)
+        internal = (
+            list(sm_internal) if sm_internal else ([_EMULATED_INTERNAL] if not fallback else [])
+        )
+        removable = list(sm_removable)
+        if not removable and not sm_removable and fallback:
+            # sm gave nothing useful — use the /storage fallback as SD candidates.
+            removable = list(fallback)
 
-    def _internal_storage(self, serial: str, mounts: list[str]) -> StorageTarget | None:
-        # Prefer the standard emulated path if present, else fall back.
+        return _VolumeSet(internal=_dedupe(internal), removable=_dedupe(removable))
+
+    def _internal_storage(
+        self, serial: str | None, target: AdbTarget | None, mounts: list[str]
+    ) -> StorageTarget | None:
         candidates = [m for m in mounts if m.startswith("/storage/emulated")]
-        if not candidates and any(
-            m == "/sdcard" or m.startswith("/storage/sdcard") for m in mounts
-        ):
-            candidates = ["/sdcard"]
         if not candidates:
             candidates = [_EMULATED_INTERNAL]
         mp = candidates[0]
-        free, total = self._free_space(serial, mp)
+        free, total = self._free_space(serial, target, mp)
         return StorageTarget(
             mount_path=mp,
             label="Internal storage",
@@ -92,8 +119,10 @@ class StorageManager:
             total_bytes=total,
         )
 
-    def _removable_storage(self, serial: str, mp: str) -> StorageTarget:
-        free, total = self._free_space(serial, mp)
+    def _removable_storage(
+        self, serial: str | None, target: AdbTarget | None, mp: str
+    ) -> StorageTarget:
+        free, total = self._free_space(serial, target, mp)
         return StorageTarget(
             mount_path=mp,
             label="SD card",
@@ -102,36 +131,31 @@ class StorageManager:
             total_bytes=total,
         )
 
-    def _free_space(self, serial: str, mp: str) -> tuple[int, int]:
-        out = self.client.shell_list(f"df -k {_posix_quote(mp)}", serial=serial)
+    def _free_space(self, serial: str | None, target: AdbTarget | None, mp: str) -> tuple[int, int]:
+        out = self.client.shell_list(f"df -k {_posix_quote(mp)}", serial=serial, target=target)
         parsed = _parse_df_kb(out)
         if parsed is None:
-            # fall back to statvfs-like via toybox `df` long form
             return 0, 0
         return parsed
 
-    def _is_removable(self, mp: str) -> bool:
-        if mp.startswith("/storage/emulated") or mp == "/sdcard":
-            return False
-        if mp.startswith("/storage/sdcard"):
-            return False
-        base = mp.rstrip("/").split("/")[-1]
-        return bool(_SDCARD_RE.match(base))
-
-    def ensure_still_available(self, storage: StorageTarget, serial: str) -> StorageTarget:
+    def ensure_still_available(
+        self, storage: StorageTarget, serial: str | None = None, target: AdbTarget | None = None
+    ) -> StorageTarget:
         """Re-check a selected storage is still present.
 
         Raises :class:`StorageUnavailableError` if it vanished (e.g. SD
         card removed) — the caller must NOT silently fall back to another
         storage.
         """
-        current = self.list_storages(serial)
+        current = self.list_storages(serial=serial, target=target)
         for s in current:
             if s.mount_path == storage.mount_path:
                 return s
         raise StorageUnavailableError(f"storage {storage.mount_path} is no longer available")
 
-    def probe_writable(self, destination: str, serial: str) -> None:
+    def probe_writable(
+        self, destination: str, serial: str | None = None, target: AdbTarget | None = None
+    ) -> None:
         """Verify the destination directory actually accepts writes.
 
         Ensures `destination` exists (creating it if needed via the ADB layer),
@@ -147,8 +171,8 @@ class StorageManager:
             # The destination may not exist yet (a brand-new target folder the
             # transfer itself would create). Create it first so the probe does
             # not fail with "No such file or directory" on a healthy card.
-            self.client.shell_mkdir(destination, serial=serial)
-            self.client.shell_touch(probe_path, serial=serial)
+            self.client.shell_mkdir(destination, serial=serial, target=target)
+            self.client.shell_touch(probe_path, serial=serial, target=target)
         except (DeviceDisconnectedError, DeviceOfflineError):
             # transport/device state, not a writability verdict — propagate as-is
             raise
@@ -160,23 +184,53 @@ class StorageManager:
             # Always attempt cleanup; the probe file is ours alone. Do NOT
             # remove the destination directory we may have just created.
             try:
-                self.client.shell_rm(probe_path, serial=serial)
+                self.client.shell_rm(probe_path, serial=serial, target=target)
             except Exception:
                 pass
+
+
+@dataclass(frozen=True)
+class _VolumeSet:
+    internal: list[str]
+    removable: list[str]
 
 
 # -- parsing helpers (pure functions, unit-testable) ------------------------
 
 
-def _parse_sm_volumes(out: str) -> list[str]:
-    """Parse `sm list-volumes` output, returning mount paths when visible.
+def _is_valid_mount_token(name: str) -> bool:
+    """A storage mount name is safe to turn into ``/storage/<name>``.
 
-    Typical lines:
-      emulated;0 mounted null null
-      public:179,0 mounted A12B-34CD
-      private;null unmountable null
+    Rejects empty/whitespace, dot/relative segments, path separators and the
+    reserved internal names, so a stray directory can never be trusted as an
+    SD card.
     """
-    mounts: list[str] = []
+    if not name or name != name.strip():
+        return False
+    if name in _RESERVED_STORAGE_NAMES:
+        return False
+    if any(c in name for c in "/\\\0"):
+        return False
+    if name.startswith(".") or ".." in name:
+        return False
+    return True
+
+
+def _parse_sm_volumes(out: str) -> tuple[list[str], list[str]]:
+    """Parse `sm list-volumes` -> (internal mounts, removable mounts).
+
+    ``sm list-volumes`` is authoritative about which volumes are
+    public/removable vs private/emulated, so it is the primary source and does
+    NOT require a UUID-shaped name. Typical lines:
+
+      emulated;0 mounted null null
+      private mounted null
+      public:179,25 mounted external_sd        <- vendor-named removable
+      public:179,1 mounted A12B-34CD           <- UUID removable
+      public:179,2 unmounted null              <- NOT mounted, ignore
+    """
+    internal: list[str] = []
+    removable: list[str] = []
     for line in out.splitlines():
         line = line.strip()
         if not line:
@@ -184,28 +238,43 @@ def _parse_sm_volumes(out: str) -> list[str]:
         fields = line.split()
         if len(fields) < 2:
             continue
-        if fields[0].startswith("emulated"):
-            continue
+        kind = fields[0]
         if "mounted" not in fields:
             continue
-        # public:<disk>,<part> mounted <uuid>
-        ident = fields[-1]
-        if not _SDCARD_RE.match(ident):
+        name = fields[-1]
+        if kind.startswith("emulated"):
+            if name in ("null", "unknown") or not name:
+                internal.append(_EMULATED_INTERNAL)
             continue
-        mounts.append(f"/storage/{ident}")
-    return mounts
+        if kind.startswith("private"):
+            # private/adopted storage is NOT removable external storage
+            continue
+        if kind.startswith("public"):
+            # public + mounted => a real physical (removable) volume.
+            if name in ("null", "unknown") or not name or name == "null":
+                continue
+            if not _is_valid_mount_token(name):
+                continue
+            removable.append(f"/storage/{name}")
+    return _dedupe(internal), _dedupe(removable)
 
 
 def _parse_storage_listing(out: str) -> list[str]:
-    """Parse `ls /storage` output into /storage/<name> mount candidates."""
+    """Parse `ls /storage` output into removable mount candidates (fallback).
+
+    Only used when `sm list-volumes` is unavailable. Excludes internal names
+    and applies conservative heuristics (UUID-style or a small set of clearly
+    vendor-named removable tokens) so a random directory is never blindly
+    treated as an SD card.
+    """
     mounts: list[str] = []
     for line in out.splitlines():
         name = line.strip()
         if not name:
             continue
-        if name in ("emulated", "self", "sdcard0", "sdcard1"):
+        if name in _RESERVED_STORAGE_NAMES:
             continue
-        if _SDCARD_RE.match(name):
+        if _SDCARD_RE.match(name) or _VENDOR_REMOVABLE_RE.match(name):
             mounts.append(f"/storage/{name}")
     return mounts
 

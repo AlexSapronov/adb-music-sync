@@ -14,18 +14,35 @@ from adb_music_sync.storage import (
 
 def test_parse_sm_volumes_sd_only():
     out = "emulated;0 mounted null null\npublic:179,1 mounted A12B-34CD\n"
-    mounts = _parse_sm_volumes(out)
-    assert mounts == ["/storage/A12B-34CD"]
+    internal, removable = _parse_sm_volumes(out)
+    assert removable == ["/storage/A12B-34CD"]
+    assert internal == ["/storage/emulated/0"]
 
 
 def test_parse_sm_volumes_different_uuid():
     out = "public:179,65 mounted 5EFE-A1B2\n"
-    assert _parse_sm_volumes(out) == ["/storage/5EFE-A1B2"]
+    _, removable = _parse_sm_volumes(out)
+    assert removable == ["/storage/5EFE-A1B2"]
 
 
 def test_parse_sm_volumes_unmounted_ignored():
     out = "public:179,1 unmounted null\n"
-    assert _parse_sm_volumes(out) == []
+    _, removable = _parse_sm_volumes(out)
+    assert removable == []
+
+
+def test_parse_sm_volumes_vendor_named_sd():
+    # FiiO JM21: vendor-named removable mount, NOT a UUID — must be recognized.
+    out = "public:179,25 mounted external_sd\n"
+    _, removable = _parse_sm_volumes(out)
+    assert removable == ["/storage/external_sd"]
+
+
+def test_parse_sm_volumes_private_ignored():
+    out = "private mounted null\n"
+    internal, removable = _parse_sm_volumes(out)
+    assert internal == []
+    assert removable == []
 
 
 def test_parse_storage_listing():

@@ -49,6 +49,7 @@ class MainWindow(QMainWindow):
         self.ctrl = controller
         self.ctrl.devices_changed.connect(self._on_devices)
         self.ctrl.storages_changed.connect(self._on_storages)
+        self.ctrl.storages_status.connect(self._on_storages_status)
         self.ctrl.scan_changed.connect(self._on_scan)
         self.ctrl.plan_changed.connect(self._on_plan)
         self.ctrl.state_changed.connect(self._on_state)
@@ -177,13 +178,26 @@ class MainWindow(QMainWindow):
         self.adb_status.setText("ADB: готов")
         self.device_hint.setText("")
         has_unauthorized = False
+        selected_serial = self.ctrl.selected_device.serial if self.ctrl.selected_device else None
         for d in devices:
-            label = f"{d.serial} — {d.state.value}"
+            # Human-readable: model -> "FiiO JM21", never "? — device".
+            state_label = "подключено" if d.state.value == "device" else d.state.value
+            label = f"{d.display_name} — {state_label}"
             rb = QRadioButton(label)
             self._device_radios[d.serial] = rb
             self._device_group.addButton(rb)
             self.device_container.addWidget(rb)
-            if d.serial == self.ctrl.selected_device.serial if self.ctrl.selected_device else False:
+            # Small diagnostic subtitle: stable serial + live transport.
+            detail_bits = []
+            if d.stable_id and d.stable_id != d.display_name:
+                detail_bits.append(f"Серийный номер: {d.stable_id}")
+            if d.transport_id is not None:
+                detail_bits.append(f"ADB transport: {d.transport_id}")
+            if detail_bits:
+                detail = QLabel("    " + "  ·  ".join(detail_bits))
+                detail.setStyleSheet("color: #888; font-size: 9pt;")
+                self.device_container.addWidget(detail)
+            if d.serial == selected_serial:
                 rb.setChecked(True)
             rb.toggled.connect(lambda checked, s=d.serial: checked and self.ctrl.select_device(s))
             if d.state.value == "unauthorized":
@@ -194,7 +208,14 @@ class MainWindow(QMainWindow):
             )
         # auto-select first ready device if none selected
         if self.ctrl.selected_device is None and devices:
-            self.ctrl.select_device(devices[0].serial)
+            ready = [d for d in devices if d.state.value == "device"] or devices
+            self.ctrl.select_device(ready[0].serial)
+
+    def _on_storages_status(self, status: str) -> None:
+        if status == "discovering":
+            self.storage_status.setText("Определение хранилищ...")
+        elif status == "error":
+            self.storage_status.setText("Не удалось получить список хранилищ")
 
     def _on_storages(self, storages) -> None:
         while self._storage_group.buttons():
@@ -218,9 +239,12 @@ class MainWindow(QMainWindow):
             rb.toggled.connect(
                 lambda checked, m=s.mount_path: checked and self.ctrl.select_storage(m)
             )
-        # select persisted storage
-        serial = self.ctrl.selected_device.serial if self.ctrl.selected_device else ""
-        saved = self.ctrl.config.get("storage_by_serial", {}).get(serial)
+        # select persisted storage (keyed by stable device id when available)
+        dev = self.ctrl.selected_device
+        dev_key = (dev.stable_id or dev.serial) if dev else ""
+        saved = self.ctrl.config.get("storage_by_serial", {}).get(dev_key)
+        if not saved and dev:
+            saved = self.ctrl.config.get("storage_by_serial", {}).get(dev.serial)
         if saved and saved in self._storage_radios:
             self._storage_radios[saved].setChecked(True)
         elif storages:

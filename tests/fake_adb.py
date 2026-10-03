@@ -47,6 +47,7 @@ class FakeAdbClient(AdbClient):
         self.offline = False  # when True, every op raises DeviceOfflineError
         self.calls: list[list[str]] = []
         self.read_only = False  # when True, touch/write ops fail (permission denied)
+        self.props: dict[str, str] = {}  # getprop key -> value (e.g. ro.serialno)
 
     # -- helpers for tests ------------------------------------------------
     @classmethod
@@ -102,16 +103,27 @@ class FakeAdbClient(AdbClient):
             self._df_map[(f"/storage/{sd_uuid}", serial)] = make(sd_size // 1024 if sd_size else 0)
 
     # -- AdbClient interface overrides ------------------------------------
-    def _run(self, args, *, serial=None, timeout=60.0) -> CommandResult:
+    def _run(self, args, *, serial=None, target=None, timeout=60.0) -> CommandResult:
         self.calls.append(list(args))
         if self.disconnect:
             raise DeviceDisconnectedError("device disconnected")
+        if self.offline:
+            raise DeviceOfflineError("device offline")
 
         cmd = args[0] if args else ""
         if cmd == "devices":
             lines = ["List of devices attached"]
             for d in self.devices:
-                lines.append(f"{d.serial}\t{d.state.value}")
+                extra = ""
+                if d.transport_id is not None:
+                    extra += f" transport_id:{d.transport_id}"
+                if d.product is not None:
+                    extra += f" product:{d.product}"
+                if d.model is not None:
+                    extra += f" model:{d.model}"
+                if d.device_name is not None:
+                    extra += f" device:{d.device_name}"
+                lines.append(f"{d.serial}\t{d.state.value}{extra}")
             return CommandResult(0, "\n".join(lines), "")
 
         if cmd == "shell":
@@ -144,6 +156,14 @@ class FakeAdbClient(AdbClient):
         if sub == "df":
             mp = args[-1].strip("'") if args else ""
             text = self._df_map.get((mp, serial), None)
+            if text is None and serial is not None:
+                text = self._df_map.get((mp, None), None)
+            if text is None:
+                # fall back to any entry with the same mount path (target dispatch)
+                for (m, _s), t in self._df_map.items():
+                    if m == mp:
+                        text = t
+                        break
             if self._free_override is not None:
                 return CommandResult(0, self._free_override, "")
             if text is None:
@@ -152,6 +172,9 @@ class FakeAdbClient(AdbClient):
                     0, "Filesystem 1K-blocks Used Available Use% M\n/dev/x 0 0 0 0% /\n", ""
                 )
             return CommandResult(0, text, "")
+        if sub == "getprop":
+            key = args[1] if len(args) > 1 else ""
+            return CommandResult(0, self.props.get(key, ""), "")
         if sub == "stat":
             # stat -c "%s" "path"
             raw = " ".join(args[1:])
@@ -206,7 +229,7 @@ class FakeAdbClient(AdbClient):
         if self.offline:
             raise DeviceOfflineError("device offline")
 
-    def push(self, local, remote, *, serial=None):
+    def push(self, local, remote, *, serial=None, target=None):
         self._check_faults()
         if self.fail_next_push:
             self.fail_next_push = False
@@ -214,27 +237,37 @@ class FakeAdbClient(AdbClient):
         self.pushed.append((local, remote))
         self.remote[remote] = 0
 
-    def shell_stat_size(self, remote, *, serial=None):
+    def shell_stat_size(self, remote, *, serial=None, target=None):
         self._check_faults()
         return self.remote.get(remote)
 
-    def shell_mkdir(self, path, *, serial=None):
+    def shell_mkdir(self, path, *, serial=None, target=None):
         self._check_faults()
         if self.read_only:
             raise AdbCommandError(f"mkdir failed for {path}: Permission denied")
         self.mkdirs.append(path)
         self.remote.setdefault(path, None)
 
-    def shell_mv(self, src, dst, *, serial=None):
+    def shell_mv(self, src, dst, *, serial=None, target=None):
         self._check_faults()
         self.moves.append((src, dst))
         if src in self.remote:
             self.remote[dst] = self.remote.pop(src)
 
-    def shell_rm(self, path, *, serial=None):
+    def shell_rm(self, path, *, serial=None, target=None):
         self._check_faults()
         self.removed.append(path)
         self.remote.pop(path, None)
+
+    def shell_touch(self, path, *, serial=None, target=None):
+        self._check_faults()
+        if self.read_only:
+            raise AdbCommandError(f"touch failed for {path}: Permission denied")
+        self.remote[path] = 0
+
+    def getprop(self, key, *, serial=None, target=None):
+        self._check_faults()
+        return self.props.get(key, "")
 
     def list_devices(self):
         self._check_faults()

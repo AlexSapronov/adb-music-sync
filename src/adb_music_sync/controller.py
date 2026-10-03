@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import threading
 
-from PySide6.QtCore import QObject, QThread, Signal
+from PySide6.QtCore import QObject, QThread, QTimer, Signal
 
 from .adb import AdbClient
 from .config import load_config, save_config
@@ -55,6 +55,7 @@ class Controller(QObject):
     state_changed = Signal(str)  # AppState value
     log_message = Signal(str)
     progress_changed = Signal(object)  # TransferProgress
+    storages_status = Signal(str)  # "discovering" | "ready" | "error" + msg
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -70,9 +71,11 @@ class Controller(QObject):
         self.engine: TransferEngine | None = None
         self.state = AppState.IDLE
         self._worker: _WorkerThread | None = None
+        self._discovery_worker: _WorkerThread | None = None
         self._engine_lock = threading.Lock()
         self._pending_destination: str | None = None
         self._pending_continuation: callable | None = None
+        self._retry_timer: QTimer | None = None
 
     # -- wiring ------------------------------------------------------------
     def _connect(self) -> None:
@@ -92,44 +95,138 @@ class Controller(QObject):
 
     # -- device actions ----------------------------------------------------
     def refresh_devices(self) -> None:
+        """Discover devices asynchronously (never blocks the GUI thread).
+
+        ``adb devices -l`` plus stable-identity resolution (``ro.serialno``)
+        run on a background worker. If no device shows up (FiiO enumerates
+        slowly right after plug-in), a short QTimer auto-retries until one
+        appears — no busy-loop, no UI freeze.
+        """
         if self.client is None:
             self._connect()
         if self.client is None:
             self.devices = []
             self.devices_changed.emit([])
             return
-        self.devices = self.client.list_devices()
-        self.devices_changed.emit(self.devices)
-        if self.selected_device is None and self.devices:
-            self.selected_device = self.devices[0]
+        self._run_discovery(self._discover_devices_work, self._on_devices_discovered)
+
+    def _discover_devices_work(self):
+        client = self.client
+        devices = client.list_devices()
+        # Resolve a stable identity (ro.serialno) for each ready device
+        # without a usable host serial, using its *live* transport selector.
+        for d in devices:
+            if d.is_ready:
+                d.stable_id = client.resolve_stable_id(d)
+        return devices
+
+    def _on_devices_discovered(self, devices: list[Device]) -> None:
+        self.devices = devices
+        self.devices_changed.emit(devices)
+        if not devices:
+            self._schedule_retry()
+            return
+        self._cancel_retry()
+        # Keep the previous selection when it still exists, by stable identity
+        # first, then host serial, then transport — reconnect may change the
+        # transport id, but the stable id pins the same physical device.
+        prev = self.selected_device
+        if prev is not None:
+            self.selected_device = self._rematch_device(prev, devices)
+        if self.selected_device is None and devices:
+            self.selected_device = devices[0]
+        if self.selected_device is not None:
+            self._refresh_storages()
+
+    def _rematch_device(self, prev: Device, devices: list[Device]) -> Device | None:
+        """Find ``prev`` among freshly discovered devices after a reconnect."""
+        prev_stable = getattr(prev, "stable_id", None)
+        if prev_stable:
+            for d in devices:
+                if d.stable_id == prev_stable:
+                    return d
+        for d in devices:
+            if d.serial == prev.serial and not prev._serial_unreliable():
+                return d
+        return None
+
+    def _schedule_retry(self) -> None:
+        log.info("No devices yet — will retry discovery shortly")
+        if self._retry_timer is None:
+            self._retry_timer = QTimer(self)
+            self._retry_timer.setSingleShot(False)
+            self._retry_timer.timeout.connect(self.refresh_devices)
+            self._retry_timer.setInterval(1500)
+        if not self._retry_timer.isActive():
+            self._retry_timer.start()
+
+    def _cancel_retry(self) -> None:
+        if self._retry_timer is not None and self._retry_timer.isActive():
+            self._retry_timer.stop()
 
     def select_device(self, serial: str) -> None:
         for d in self.devices:
             if d.serial == serial:
                 self.selected_device = d
-                self.config["selected_serial"] = serial
+                self.config["selected_serial"] = d.stable_id or d.serial or serial
                 self._save()
                 self._refresh_storages()
                 return
 
+    # -- storage discovery -------------------------------------------------
     def _refresh_storages(self) -> None:
+        """Discover storages for the selected device asynchronously."""
         if self.storage_manager is None or self.selected_device is None:
             self.storages = []
             self.storages_changed.emit([])
             return
-        if self.selected_device.state.value != "device":
+        if not self.selected_device.is_ready:
             self.storages = []
             self.storages_changed.emit([])
             return
-        self.storages = self.storage_manager.list_storages(self.selected_device.serial)
-        self.storages_changed.emit(self.storages)
+        self.storages_status.emit("discovering")
+        self._run_discovery(self._discover_storages_work, self._on_storages_discovered)
+
+    def _discover_storages_work(self):
+        device = self.selected_device
+        mgr = self.storage_manager
+        return mgr.list_storages(target=device.selector)
+
+    def _on_storages_discovered(self, storages: list[StorageTarget]) -> None:
+        self.storages = storages
+        self.storages_changed.emit(storages)
+        self.storages_status.emit("ready")
+        for s in storages:
+            log.info(
+                "%s: %s (free=%d, total=%d)",
+                "Internal" if not s.is_removable else "Removable",
+                s.mount_path,
+                s.free_bytes,
+                s.total_bytes,
+            )
+        # Re-select the remembered storage (by stable device id) if present.
+        if self.selected_device is not None:
+            key = self.config.get("storage_by_serial", {}).get(
+                self.selected_device.stable_id or self.selected_device.serial
+            )
+            if key:
+                for s in storages:
+                    if s.mount_path == key:
+                        self.selected_storage = s
+                        break
+
+    def _on_discovery_error(self, exc: Exception) -> None:
+        self.storages_status.emit("error")
+        self.log_message.emit(f"Discovery failed: {exc}")
+        log.error("Discovery failed: %s", exc)
 
     def select_storage(self, mount_path: str) -> None:
         for s in self.storages:
             if s.mount_path == mount_path:
                 self.selected_storage = s
                 if self.selected_device is not None:
-                    self.config["storage_by_serial"][self.selected_device.serial] = mount_path
+                    dev_key = self.selected_device.stable_id or self.selected_device.serial
+                    self.config["storage_by_serial"][dev_key] = mount_path
                 self._save()
                 return
 
@@ -254,6 +351,27 @@ class Controller(QObject):
         self.start_transfer(self.engine.destination)
 
     # -- helpers -----------------------------------------------------------
+    def _run_discovery(self, fn, on_done) -> None:
+        """Run a device/storage discovery on its own lightweight worker.
+
+        Discovery is deliberately independent from the scan/transfer single
+        worker: it must never be serialized behind a long transfer, and it
+        must never block the UI. Its own guard prevents overlapping discovery
+        passes (e.g. a burst of refresh button clicks).
+        """
+        if self._discovery_worker is not None:
+            return  # a discovery pass is already in flight — drop duplicates
+        worker = _WorkerThread(fn, parent=self)
+        worker.finished_ok.connect(on_done)
+        worker.failed.connect(self._on_discovery_error)
+        worker.finished.connect(lambda _w=worker: self._on_discovery_finished(_w))
+        self._discovery_worker = worker
+        worker.start()
+
+    def _on_discovery_finished(self, worker: _WorkerThread) -> None:
+        if self._discovery_worker is worker:
+            self._discovery_worker = None
+
     def _run_background(self, fn, on_done) -> None:
         if self._worker is not None:
             return  # strictly one worker at a time — never overlap
@@ -310,6 +428,7 @@ class Controller(QObject):
         """
         if self.engine is not None:
             self.engine.cancel()
+        self._cancel_retry()
         if self._worker is not None and self._worker.isRunning():
             # Wait for the worker to finish the in-flight file and observe
             # the cancel flag. Worker exits *between* files, so this is

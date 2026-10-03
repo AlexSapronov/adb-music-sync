@@ -15,12 +15,70 @@ class DeviceState(str, Enum):
 
 @dataclass
 class Device:
-    serial: str
+    """A connected Android device.
+
+    Splits the two distinct notions the ADB layer needs:
+
+    * ``serial`` / ``transport_id`` — how ADB addresses the device *right now*
+      (session-specific; a host serial can literally be ``?`` and a transport
+      id changes after every reconnect);
+    * ``stable_id`` — a persistent identity (``ro.serialno``) for settings.
+
+    ``model`` / ``product`` / ``device_name`` come straight from
+    ``adb devices -l`` and are human-facing metadata.
+    """
+
+    serial: str  # host-side ADB serial (may be "?" or empty)
     state: DeviceState
+    transport_id: int | None = None
+    product: str | None = None
+    model: str | None = None
+    device_name: str | None = None
+    stable_id: str | None = None  # ro.serialno if resolvable (persistent)
 
     @property
     def is_ready(self) -> bool:
         return self.state is DeviceState.DEVICE
+
+    @property
+    def display_name(self) -> str:
+        """Human-readable device label; falls back to the raw serial."""
+        if self.model:
+            return self.model.replace("_", " ")
+        return self.serial or "(unknown)"
+
+    @property
+    def selector(self) -> AdbTarget:
+        """The runtime ADB selector for this device right now.
+
+        Prefers ``-t <transport_id>`` when the host serial is unreliable
+        (``?`` / empty), else ``-s <serial>``. Never emits ``-s ?``.
+        """
+        if self.transport_id is not None and self._serial_unreliable():
+            return AdbTarget(transport_id=self.transport_id)
+        return AdbTarget(serial=self.serial)
+
+    def _serial_unreliable(self) -> bool:
+        return not self.serial or self.serial in ("?", "unknown", "null")
+
+
+@dataclass(frozen=True)
+class AdbTarget:
+    """How to reach one device in the current session — serial or transport.
+
+    Exactly one field is set. Every ADB command funnels through this so the
+    ``-s ?`` / ``-t N`` choice is centralized in one place (AdbClient).
+    """
+
+    serial: str | None = None
+    transport_id: int | None = None
+
+    def args(self) -> list[str]:
+        if self.transport_id is not None:
+            return ["-t", str(self.transport_id)]
+        if self.serial is not None:
+            return ["-s", self.serial]
+        return []
 
 
 @dataclass
