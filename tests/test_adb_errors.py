@@ -90,7 +90,7 @@ def test_shell_command_shapes_use_quote_helper(monkeypatch):
     _posix_quote so quotes/special chars survive ``adb shell``."""
     captured = {}
 
-    def fake_run_checked(args, *, serial=None, timeout=60.0):
+    def fake_run_checked(args, *, serial=None, target=None, timeout=60.0):
         captured["args"] = list(args)
 
     c = AdbClient(adb_path="/fake/adb")
@@ -119,7 +119,7 @@ def test_shell_command_shapes_use_quote_helper(monkeypatch):
 def test_shell_stat_size_quotes_path(monkeypatch):
     captured = {}
 
-    def fake_shell_list(script, *, serial=None):
+    def fake_shell_list(script, *, serial=None, target=None):
         captured["script"] = script
         return "123\n"
 

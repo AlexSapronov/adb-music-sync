@@ -47,6 +47,7 @@ class FakeAdbClient(AdbClient):
         self.offline = False  # when True, every op raises DeviceOfflineError
         self.calls: list[list[str]] = []
         self.read_only = False  # when True, touch/write ops fail (permission denied)
+        self.props: dict[str, str] = {}  # getprop key -> value (e.g. ro.serialno)
 
     # -- helpers for tests ------------------------------------------------
     @classmethod
@@ -102,16 +103,27 @@ class FakeAdbClient(AdbClient):
             self._df_map[(f"/storage/{sd_uuid}", serial)] = make(sd_size // 1024 if sd_size else 0)
 
     # -- AdbClient interface overrides ------------------------------------
-    def _run(self, args, *, serial=None, timeout=60.0) -> CommandResult:
+    def _run(self, args, *, serial=None, target=None, timeout=60.0) -> CommandResult:
         self.calls.append(list(args))
         if self.disconnect:
             raise DeviceDisconnectedError("device disconnected")
+        if self.offline:
+            raise DeviceOfflineError("device offline")
 
         cmd = args[0] if args else ""
         if cmd == "devices":
             lines = ["List of devices attached"]
             for d in self.devices:
-                lines.append(f"{d.serial}\t{d.state.value}")
+                extra = ""
+                if d.transport_id is not None:
+                    extra += f" transport_id:{d.transport_id}"
+                if d.product is not None:
+                    extra += f" product:{d.product}"
+                if d.model is not None:
+                    extra += f" model:{d.model}"
+                if d.device_name is not None:
+                    extra += f" device:{d.device_name}"
+                lines.append(f"{d.serial}\t{d.state.value}{extra}")
             return CommandResult(0, "\n".join(lines), "")
 
         if cmd == "shell":
@@ -152,6 +164,9 @@ class FakeAdbClient(AdbClient):
                     0, "Filesystem 1K-blocks Used Available Use% M\n/dev/x 0 0 0 0% /\n", ""
                 )
             return CommandResult(0, text, "")
+        if sub == "getprop":
+            key = args[1] if len(args) > 1 else ""
+            return CommandResult(0, self.props.get(key, ""), "")
         if sub == "stat":
             # stat -c "%s" "path"
             raw = " ".join(args[1:])
