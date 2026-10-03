@@ -172,7 +172,10 @@ class TransferEngine:
                 self.state = AppState.CANCELLING
                 return
             self.state = AppState.COMPLETED if self._error_count() == 0 else AppState.FAILED
-        except DeviceDisconnectedError:
+        except (DeviceDisconnectedError, DeviceOfflineError):
+            # Lost the device (physically unplugged OR temporarily offline):
+            # a recoverable disconnect state, not a hard failure. The queue
+            # keeps already-transferred files OK and the in-flight file PENDING.
             self.state = AppState.DISCONNECTED
             raise
         except StorageUnavailableError:
