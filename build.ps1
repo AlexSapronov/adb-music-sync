@@ -21,7 +21,6 @@ python -m PyInstaller `
     --name $AppName `
     --onefile `
     --windowed `
-    --collect-all PySide6 `
     --paths src `
     "$PSScriptRoot\src\adb_music_sync\__main__.py"
 
@@ -29,7 +28,11 @@ $Exe = Join-Path $DistDir "$AppName.exe"
 if (-not (Test-Path $Exe)) {
     throw "Build failed: $Exe not produced"
 }
-Write-Host "==> Built $Exe"
+$SizeMiB = [math]::Round((Get-Item $Exe).Length / 1MB, 2)
+Write-Host "==> Built $Exe ($SizeMiB MiB)"
+if ((Get-Item $Exe).Length -gt 80MB) {
+    throw "EXE exceeds the 80 MiB size budget: $SizeMiB MiB"
+}
 
 # 3. Frozen smoke test — prove the .exe really runs (imports + Qt), not just
 #    that PyInstaller produced a file. Must exit 0. Start-Process -Wait is

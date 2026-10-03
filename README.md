@@ -102,6 +102,8 @@ powershell -ExecutionPolicy Bypass -File build.ps1
 
 Скрипт создаёт standalone `.exe` (PyInstaller, onefile, windowed), затем запускает собранный `.exe` в режиме `--smoke-test` (импорт runtime-модулей + проверка загрузки PySide6, без GUI и без ADB), и только после успешного завершения собирает portable-архив `adb-music-sync-0.1.3-windows.zip`.
 
+Для сборки используются штатные Qt-hooks PyInstaller без `--collect-all PySide6`: в EXE попадают используемые Qt-модули и их зависимости. Зависимость `PySide6-Essentials` предоставляет нужные QtCore/QtGui/QtWidgets без пакета Addons. Скрипт и CI показывают фактический размер EXE и отклоняют сборку больше 80 MiB. Frozen smoke test загружает графический платформенный плагин и создаёт виджеты/диалог выбора файла без показа окон и обращения к ADB.
+
 В portable-сборке папка `platform-tools/` пуста — положите туда `adb.exe` (и сопутствующие файлы) из официального [Android platform-tools](https://developer.android.com/tools/releases/platform-tools), либо убедитесь, что `adb` есть в `PATH`.
 
 ## Известные ограничения MVP
