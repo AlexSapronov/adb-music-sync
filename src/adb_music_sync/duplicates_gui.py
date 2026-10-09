@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import threading
 
+from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
@@ -11,6 +12,7 @@ from PySide6.QtWidgets import (
     QLabel,
     QMessageBox,
     QPushButton,
+    QSlider,
     QTreeWidget,
     QTreeWidgetItem,
     QVBoxLayout,
@@ -18,7 +20,7 @@ from PySide6.QtWidgets import (
 )
 
 from . import APP_NAME
-from .duplicates import DuplicateManager
+from .duplicates import MATCH_LABELS, DuplicateManager
 from .models import AppState
 
 
@@ -34,12 +36,29 @@ class DuplicatesPane(QWidget):
         self.cancel = threading.Event()
         layout = QVBoxLayout(self)
         description = QLabel(
-            "Полные дубли: одинаковые байты и SHA-256, независимо от имени.\n"
-            "MP3 и FLAC одной песни, файлы с разными тегами не считаются дублями.\n"
+            "Точные дубли подтверждаются SHA-256. Повышение агрессивности добавляет возможные совпадения.\n"
+            "Возможные дубли проверяйте вручную: это могут быть разные исполнения, форматы или мастеринги.\n"
             "Выберите папку музыки выше. Во время очистки закройте Poweramp."
         )
         description.setWordWrap(True)
         layout.addWidget(description)
+        aggression_row = QHBoxLayout()
+        aggression_row.addWidget(QLabel("Агрессивность:"))
+        self.aggression = QSlider(Qt.Horizontal)
+        self.aggression.setRange(0, 3)
+        self.aggression.setSingleStep(1)
+        self.aggression.setPageStep(1)
+        self.aggression.setTickInterval(1)
+        self.aggression.setTickPosition(QSlider.TicksBelow)
+        self.aggression.setMinimumWidth(160)
+        self.aggression.setToolTip(
+            "Влево — только точные дубли; вправо — больше возможных совпадений"
+        )
+        aggression_row.addWidget(self.aggression, 1)
+        self.aggression_label = QLabel(MATCH_LABELS[0])
+        aggression_row.addWidget(self.aggression_label)
+        layout.addLayout(aggression_row)
+        self.aggression.valueChanged.connect(self._aggression_changed)
         row = QHBoxLayout()
         self.find_btn = QPushButton("Найти дубликаты")
         self.find_btn.clicked.connect(self._scan)
@@ -55,9 +74,18 @@ class DuplicatesPane(QWidget):
         self.status.setWordWrap(True)
         layout.addWidget(self.status)
         self.tree = QTreeWidget()
-        self.tree.setColumnCount(3)
-        self.tree.setHeaderLabels(["Группа / путь копии", "Обрабатывать", "Оставить копию"])
-        self.tree.setColumnWidth(0, 460)
+        self.tree.setColumnCount(4)
+        self.tree.setHeaderLabels(
+            [
+                "Группа / путь файла",
+                "Совпадение / длительность / размер",
+                "Обрабатывать",
+                "Оставить файл",
+            ]
+        )
+        self.tree.setColumnWidth(0, 400)
+        self.tree.setColumnWidth(1, 265)
+        self.tree.setColumnWidth(2, 95)
         layout.addWidget(self.tree, 1)
         layout.addWidget(QLabel("Карантин на выбранном хранилище (доступен после перезапуска):"))
         row = QHBoxLayout()
@@ -123,8 +151,13 @@ class DuplicatesPane(QWidget):
             and self.ctrl.state
             not in (AppState.TRANSFERRING, AppState.PAUSED, AppState.CANCELLING, AppState.SCANNING)
         )
+        self.aggression.setEnabled(idle)
         self.find_btn.setEnabled(idle)
-        self.apply_btn.setEnabled(idle and self.scan is not None and bool(self.choices))
+        self.apply_btn.setEnabled(
+            idle
+            and self.scan is not None
+            and any(checked.isChecked() for checked, _, _ in self.choices)
+        )
         self.sessions_btn.setEnabled(idle)
         self.session_combo.setEnabled(idle)
         state = self.session_combo.currentData()
@@ -141,6 +174,14 @@ class DuplicatesPane(QWidget):
         )
         QMessageBox.warning(self, APP_NAME, message)
 
+    def _aggression_changed(self, value):
+        self.aggression_label.setText(MATCH_LABELS[value])
+        self.scan = None
+        self.choices.clear()
+        self.tree.clear()
+        self.status.setText("Уровень изменён. Нажмите «Найти дубликаты» для нового сравнения.")
+        self._update_buttons()
+
     def _scan(self):
         try:
             manager = self._manager()
@@ -148,6 +189,7 @@ class DuplicatesPane(QWidget):
         except Exception as exc:
             self._failed(str(exc))
             return
+        level = self.aggression.value()
         self.scan = None
         self.tree.clear()
         self.choices.clear()
@@ -156,35 +198,66 @@ class DuplicatesPane(QWidget):
         def done(scan):
             self.scan = scan
             self.scan_context = context
-            self.status.setText(
+            exact = sum(g.mode == "exact" for g in scan.groups)
+            possible = len(scan.groups) - exact
+            text = (
                 f"Файлов: {scan.file_count}. Проверено хешей: {scan.hashed_count}. "
-                f"Групп дублей: {len(scan.groups)}. Лишних копий: {sum(len(g.paths) - 1 for g in scan.groups)}.\n"
-                f"Можно освободить после удаления карантина: {scan.redundant_bytes / 1024**2:.1f} MiB. "
-                "Проверьте выбор сохраняемых копий."
+                f"Точных групп: {exact}. Возможных групп: {possible}.\n"
+                f"Объём кандидатов при сохранении первого файла: {scan.redundant_bytes / 1024**2:.1f} MiB. "
+                "Возможные совпадения не выбраны автоматически."
             )
+            if scan.level:
+                text += f"\nДлительность из Android доступна для {scan.duration_count}/{scan.file_count} файлов."
+            if scan.level == 1:
+                text += " Файлы без длительности участвуют только в проверке точных дублей."
+            self.status.setText(text)
+            modes = {
+                "exact": "Точный SHA-256",
+                "name_duration": "Название + длительность ±2 с",
+                "name": "Одинаковое название",
+                "similar_name": "Похожие названия ≥90%",
+            }
             for index, group in enumerate(scan.groups, 1):
+                kind = "Точные дубли" if group.mode == "exact" else "ВОЗМОЖНЫЕ совпадения"
                 item = QTreeWidgetItem(
-                    [
-                        f"Группа {index}: {len(group.paths)} копии, {group.size / 1024**2:.1f} MiB каждая"
-                    ]
+                    [f"{index}. {kind}: {len(group.paths)} файлов", modes[group.mode]]
                 )
+                if group.mode != "exact":
+                    item.setToolTip(
+                        0,
+                        "Содержимое файлов различается. Проверяйте версии и качество перед очисткой.",
+                    )
                 self.tree.addTopLevelItem(item)
                 checked = QCheckBox()
-                checked.setChecked(True)
-                self.tree.setItemWidget(item, 1, checked)
+                checked.setChecked(group.mode == "exact")
+                checked.toggled.connect(lambda _: self._update_buttons())
+                self.tree.setItemWidget(item, 2, checked)
                 choice = QComboBox()
+                durations = dict(group.durations)
                 for path in group.paths:
                     choice.addItem(path, path)
-                    QTreeWidgetItem(item, [path])
-                self.tree.setItemWidget(item, 2, choice)
+                    choice.setItemData(choice.count() - 1, path, Qt.ToolTipRole)
+                    duration = durations.get(path)
+                    duration_text = (
+                        f"{duration // 60000}:{duration // 1000 % 60:02d}"
+                        if duration is not None
+                        else "длительность —"
+                    )
+                    size = group.size_for(path) / 1024**2
+                    child = QTreeWidgetItem(item, [path, f"{duration_text} | {size:.1f} MiB"])
+                    child.setToolTip(0, path)
+                self.tree.setItemWidget(item, 3, choice)
                 self.choices.append((checked, choice, group))
                 item.setExpanded(True)
-            self.tree.setColumnWidth(2, 340)
+            self.tree.setColumnWidth(3, 340)
             self._update_buttons()
 
         self._run(
             lambda: manager.scan(
-                context[3], progress=self.ctrl.maintenance_message.emit, cancel=self.cancel
+                context[3],
+                level=level,
+                progress=self.ctrl.maintenance_message.emit,
+                cancel=self.cancel,
             ),
             done,
         )
@@ -202,6 +275,7 @@ class DuplicatesPane(QWidget):
             if not keep:
                 raise ValueError("Выберите группы для очистки.")
             count = sum(len(g.paths) - 1 for _, _, g in self.choices if g.digest in keep)
+            possible = sum(g.mode != "exact" for _, _, g in self.choices if g.digest in keep)
         except Exception as exc:
             self._failed(str(exc))
             return
@@ -209,8 +283,13 @@ class DuplicatesPane(QWidget):
             QMessageBox.question(
                 self,
                 APP_NAME,
-                f"Переместить {count} лишних копий в карантин и обновить файловые плейлисты?\n"
-                "Восстановление доступно во вкладке «Дубликаты». Закройте Poweramp перед операцией.",
+                f"Переместить {count} выбранных файлов в карантин и обновить файловые плейлисты?\n"
+                + (
+                    f"Вы выбрали {possible} групп ВОЗМОЖНЫХ совпадений: файлы могут содержать разные исполнения.\n"
+                    if possible
+                    else ""
+                )
+                + "Восстановление доступно во вкладке «Дубликаты». Закройте Poweramp перед операцией.",
                 QMessageBox.Yes | QMessageBox.No,
                 QMessageBox.No,
             )

@@ -4,7 +4,7 @@
 
 $ErrorActionPreference = "Stop"
 
-$Version = "0.2.0"
+$Version = "0.2.1"
 $AppName = "adb-music-sync"
 $DistDir = Join-Path $PSScriptRoot "dist"
 $BuildDir = Join-Path $PSScriptRoot "build"

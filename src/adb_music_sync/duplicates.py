@@ -3,14 +3,17 @@
 from __future__ import annotations
 
 import base64
+import hashlib
 import json
 import posixpath
 import re
 import threading
+import unicodedata
 import uuid
 from collections import defaultdict
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from difflib import SequenceMatcher
 from pathlib import PurePosixPath
 
 from .adb import AdbClient
@@ -30,6 +33,16 @@ class DuplicateGroup:
     digest: str
     size: int
     paths: tuple[str, ...]
+    mode: str = "exact"
+    hashes: tuple[tuple[str, str], ...] = ()
+    sizes: tuple[tuple[str, int], ...] = ()
+    durations: tuple[tuple[str, int], ...] = ()
+
+    def hash_for(self, path: str) -> str:
+        return dict(self.hashes).get(path, self.digest)
+
+    def size_for(self, path: str) -> int:
+        return dict(self.sizes).get(path, self.size)
 
 
 @dataclass(frozen=True)
@@ -38,10 +51,90 @@ class DuplicateScan:
     groups: tuple[DuplicateGroup, ...]
     file_count: int
     hashed_count: int
+    level: int = 0
+    duration_count: int = 0
 
     @property
     def redundant_bytes(self) -> int:
-        return sum(g.size * (len(g.paths) - 1) for g in self.groups)
+        return sum(sum(g.size_for(p) for p in g.paths[1:]) for g in self.groups)
+
+
+MATCH_LABELS = (
+    "0 — Точные: SHA-256",
+    "1 — Название + длительность (±2 с)",
+    "2 — Одинаковые названия",
+    "3 — Похожие названия (≥90%)",
+)
+
+
+def normalized_name(path: str) -> str:
+    """Filename heuristic, retaining live/remix/remaster/version words."""
+    name = unicodedata.normalize("NFKC", PurePosixPath(path).stem).casefold()
+    name = re.sub(r"^\d{1,2}[-.]\d{2,3}[ ._-]+", "", name)
+    name = re.sub(r"^\d{2,3}[ ._-]+", "", name)
+    return " ".join("".join(c if c.isalnum() else " " for c in name).split())
+
+
+def names_match(first: str, second: str) -> bool:
+    if first == second:
+        return bool(first)
+    if min(len(first), len(second)) < 5:
+        return False
+    if 2 * min(len(first), len(second)) < 0.9 * (len(first) + len(second)):
+        return False
+    matcher = SequenceMatcher(None, first, second, autojunk=False)
+    return (
+        matcher.real_quick_ratio() >= 0.9
+        and matcher.quick_ratio() >= 0.9
+        and matcher.ratio() >= 0.9
+    )
+
+
+def possible_groups(
+    paths: list[str], durations: dict[str, int], level: int, *, cancel=None, progress=None
+) -> list[tuple[str, ...]]:
+    """Complete-link clusters: no A≈B≈C chain if A and C do not match."""
+    by_name = defaultdict(list)
+    for path in sorted(paths):
+        name = normalized_name(path)
+        if name:
+            by_name[name].append(path)
+    clusters = []
+    if level in (1, 2):
+        for files in by_name.values():
+            if level == 2:
+                if len(files) > 1:
+                    clusters.append(tuple(files))
+                continue
+            # Missing duration never silently degrades to name-only matching.
+            ordered = sorted((durations[p], p) for p in files if p in durations)
+            current = []
+            for duration, path in ordered:
+                if current and duration - durations[current[0]] > 2000:
+                    if len(current) > 1:
+                        clusters.append(tuple(sorted(current)))
+                    current = []
+                current.append(path)
+            if len(current) > 1:
+                clusters.append(tuple(sorted(current)))
+    elif level == 3:
+        name_clusters = []
+        for index, name in enumerate(sorted(by_name), 1):
+            if cancel is not None and cancel.is_set():
+                raise OperationCancelled("Поиск остановлен.")
+            if progress and index % 100 == 0:
+                progress(f"Сравнение названий: {index}/{len(by_name)}")
+            for cluster in name_clusters:
+                if all(names_match(name, member) for member in cluster):
+                    cluster.append(name)
+                    break
+            else:
+                name_clusters.append([name])
+        for cluster in name_clusters:
+            files = tuple(sorted(p for name in cluster for p in by_name[name]))
+            if len(files) > 1:
+                clusters.append(files)
+    return clusters
 
 
 def rewrite_playlist(data: bytes, playlist_path: str, replacements: dict[str, str]) -> bytes:
@@ -116,7 +209,9 @@ class DuplicateManager:
         self._safe_existing(path, root)
         return self.client.sha256(path, target=self.target)
 
-    def scan(self, folder: str, *, progress=None, cancel=None) -> DuplicateScan:
+    def scan(self, folder: str, *, level: int = 0, progress=None, cancel=None) -> DuplicateScan:
+        if level not in range(4):
+            raise ValueError("Неизвестный уровень агрессивности.")
         root = validate_destination(self.storage_root, folder or "Music")
         if root != self.storage_root:
             self._safe_existing(root, self.storage_root)
@@ -147,7 +242,55 @@ class DuplicateManager:
             for (size, digest), group in sorted(hashes.items())
             if len(group) > 1
         )
-        return DuplicateScan(root, groups, len(paths), len(candidates))
+        durations = {}
+        if level:
+            if progress:
+                progress("Чтение длительности из медиатеки Android…")
+            raw_durations = self.client.audio_durations(target=self.target)
+            canonical_root = self.client.canonical_path(root, target=self.target)
+            for path in paths:
+                value = raw_durations.get(path)
+                if value is None:
+                    canonical = posixpath.join(canonical_root, posixpath.relpath(path, root))
+                    value = raw_durations.get(canonical)
+                if value is not None:
+                    durations[path] = value
+            # Exact groups have priority and never overlap possible groups.
+            exact_paths = {p for g in groups for p in g.paths}
+            near = possible_groups(
+                [p for p in paths if p not in exact_paths],
+                durations,
+                level,
+                cancel=cancel,
+                progress=progress,
+            )
+            extra_groups = []
+            known_hashes = {p: digest for (_, digest), members in hashes.items() for p in members}
+            for members in near:
+                group_hashes = []
+                for path in members:
+                    self._check_cancel(cancel)
+                    if path not in known_hashes:
+                        if progress:
+                            progress(f"Фиксация файла для карантина: {posixpath.basename(path)}")
+                        known_hashes[path] = self._hash(path, root)
+                    group_hashes.append((path, known_hashes[path]))
+                group_id = "possible:" + hashlib.sha256("\0".join(members).encode()).hexdigest()
+                mode = ("name_duration", "name", "similar_name")[level - 1]
+                extra_groups.append(
+                    DuplicateGroup(
+                        group_id,
+                        sizes[members[0]],
+                        members,
+                        mode,
+                        tuple(group_hashes),
+                        tuple((p, sizes[p]) for p in members),
+                        tuple((p, durations[p]) for p in members if p in durations),
+                    )
+                )
+            groups += tuple(extra_groups)
+            candidates = list(known_hashes)
+        return DuplicateScan(root, groups, len(paths), len(candidates), level, len(durations))
 
     def _save(self, session: str, journal: dict) -> None:
         payload = json.dumps(journal, ensure_ascii=False, indent=2).encode("utf-8")
@@ -195,7 +338,7 @@ class DuplicateManager:
                 self._check_cancel(cancel)
                 if progress:
                     progress(f"Повторная проверка: {posixpath.basename(path)}")
-                if self._hash(path, root) != group.digest:
+                if self._hash(path, root) != group.hash_for(path):
                     raise ValueError(f"Файл изменился после поиска: {path}. Повторите поиск.")
                 if path != kept:
                     if any(c in path + kept for c in "\r\n"):
@@ -204,7 +347,14 @@ class DuplicateManager:
                         )
                     replacements[path] = kept
                     entries.append(
-                        {"original": path, "kept": kept, "sha256": group.digest, "size": group.size}
+                        {
+                            "original": path,
+                            "kept": kept,
+                            "sha256": group.hash_for(path),
+                            "kept_sha256": group.hash_for(kept),
+                            "size": group.size_for(path),
+                            "match_mode": group.mode,
+                        }
                     )
         if not entries:
             raise ValueError("Не выбраны группы дубликатов.")
@@ -248,10 +398,9 @@ class DuplicateManager:
                 progress(
                     f"В карантин: {index}/{len(entries)} — {posixpath.basename(entry['original'])}"
                 )
-            if (
-                self._hash(entry["original"], root) != entry["sha256"]
-                or self._hash(entry["kept"], root) != entry["sha256"]
-            ):
+            if self._hash(entry["original"], root) != entry["sha256"] or self._hash(
+                entry["kept"], root
+            ) != entry.get("kept_sha256", entry["sha256"]):
                 raise ValueError(
                     "Файл изменился во время очистки. Восстановите незавершённый карантин."
                 )
@@ -292,6 +441,8 @@ class DuplicateManager:
             if original in originals or not is_supported(original):
                 raise ValueError("Повторный/неаудио путь в журнале.")
             originals.add(original)
+            if not re.fullmatch(r"[0-9a-f]{64}", entry.get("kept_sha256", entry["sha256"])):
+                raise ValueError("Повреждённый хеш сохраняемой копии.")
             for path in (original, entry["kept"]):
                 if (
                     posixpath.normpath(path) != path
@@ -400,7 +551,7 @@ class DuplicateManager:
         # Require every kept copy to still exist and match before any deletion.
         for entry in journal["entries"]:
             self._check_cancel(cancel)
-            if self._hash(entry["kept"], root) != entry["sha256"]:
+            if self._hash(entry["kept"], root) != entry.get("kept_sha256", entry["sha256"]):
                 raise ValueError("Сохранённая копия изменилась/исчезла. Удаление запрещено.")
             if self.client.path_exists(entry["quarantined"], target=self.target):
                 if self._hash(entry["quarantined"], session) != entry["sha256"]:
@@ -415,7 +566,7 @@ class DuplicateManager:
                 progress(f"Окончательное удаление: {index}/{len(journal['entries'])}")
             if self.client.path_exists(entry["quarantined"], target=self.target):
                 if (
-                    self._hash(entry["kept"], root) != entry["sha256"]
+                    self._hash(entry["kept"], root) != entry.get("kept_sha256", entry["sha256"])
                     or self._hash(entry["quarantined"], session) != entry["sha256"]
                 ):
                     raise ValueError("Файл изменился во время удаления.")

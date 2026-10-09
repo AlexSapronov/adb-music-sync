@@ -358,6 +358,46 @@ class AdbClient:
             raise AdbCommandError(f"Invalid SHA-256 response: {path}")
         return digest.lower()
 
+    def audio_durations(self, *, target: AdbTarget) -> dict[str, int]:
+        """Optional MediaStore index; unavailable permissions return no durations."""
+        result = self._run(
+            [
+                "shell",
+                "content query --uri content://media/external/audio/media "
+                "--projection duration:_data",
+            ],
+            target=target,
+            timeout=60.0,
+        )
+        if not result.ok:
+            blob = (result.stderr + result.stdout).lower()
+            if any(
+                marker in blob
+                for marker in (
+                    *_OFFLINE_MARKERS,
+                    *_UNAUTHORIZED_MARKERS,
+                    "no devices/emulators found",
+                    "device disconnected",
+                    "device not found",
+                    "connection reset",
+                    "broken pipe",
+                    "remote closed",
+                )
+            ):
+                self._raise_for(result, target=target)
+            return {}
+        durations = {}
+        for line in result.stdout.splitlines():
+            match = re.fullmatch(r"Row: \d+ duration=(\d+), _data=(/.+)", line)
+            if match and int(match[1]) > 0:
+                # A conflicting/stale duplicate row is not usable evidence.
+                path, duration = match[2], int(match[1])
+                if path in durations and durations[path] != duration:
+                    durations[path] = 0
+                else:
+                    durations.setdefault(path, duration)
+        return {path: value for path, value in durations.items() if value > 0}
+
     def read_bytes(self, path: str, *, target: AdbTarget, limit: int = 16 * 1024 * 1024) -> bytes:
         size = self.shell_stat_size(path, target=target)
         if size is None or size > limit:

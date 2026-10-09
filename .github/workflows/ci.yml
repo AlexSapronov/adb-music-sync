@@ -59,5 +59,5 @@ jobs:
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: adb-music-sync-0.2.0-windows
+          name: adb-music-sync-0.2.1-windows
           path: dist/adb-music-sync.exe
