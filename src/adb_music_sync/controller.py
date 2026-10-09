@@ -48,6 +48,9 @@ class _WorkerThread(QThread):
 class Controller(QObject):
     """Coordinates all backend operations and exposes them to the UI."""
 
+    catalog_exported = Signal(str, int)
+    catalog_busy_changed = Signal(bool)
+    catalog_failed = Signal(str)
     devices_changed = Signal(list)
     storages_changed = Signal(list)
     scan_changed = Signal(object)  # ScanResult
@@ -70,6 +73,7 @@ class Controller(QObject):
         self.plan: TransferPlan | None = None
         self.engine: TransferEngine | None = None
         self.state = AppState.IDLE
+        self.catalog_busy = False
         self._worker: _WorkerThread | None = None
         self._discovery_worker: _WorkerThread | None = None
         self._engine_lock = threading.Lock()
@@ -229,6 +233,43 @@ class Controller(QObject):
                     self.config["storage_by_serial"][dev_key] = mount_path
                 self._save()
                 return
+
+    # -- device catalog ----------------------------------------------------
+    def export_catalog_async(self, music_folder: str, output: str) -> None:
+        if self._worker is not None or self.state in (
+            AppState.TRANSFERRING,
+            AppState.PAUSED,
+            AppState.CANCELLING,
+            AppState.SCANNING,
+        ):
+            self.catalog_failed.emit("Дождитесь завершения текущей операции.")
+            return
+        if (
+            self.client is None
+            or self.selected_device is None
+            or not self.selected_device.is_ready
+            or self.selected_storage is None
+        ):
+            self.catalog_failed.emit("Выберите подключённое устройство и хранилище.")
+            return
+        from .catalog import export_catalog
+
+        # Capture the live selection before starting the worker.
+        client = self.client
+        target = self.selected_device.selector
+        root = self.selected_storage.mount_path
+        self.catalog_busy = True
+        self.catalog_busy_changed.emit(True)
+        self.log_message.emit("Чтение каталога музыки с устройства…")
+
+        def work():
+            return export_catalog(client, root, music_folder, output, target=target)
+
+        def done(catalog):
+            self.catalog_exported.emit(output, catalog["track_count"])
+            self.log_message.emit(f"Каталог сохранён: {output} ({catalog['track_count']} треков)")
+
+        self._run_background(work, done)
 
     # -- scanning ----------------------------------------------------------
     def scan_library_async(self, folder: str, destination: str | None = None) -> None:
@@ -397,12 +438,19 @@ class Controller(QObject):
     def _on_worker_finished(self, worker: _WorkerThread) -> None:
         if self._worker is worker:
             self._worker = None
+        if self.catalog_busy:
+            self.catalog_busy = False
+            self.catalog_busy_changed.emit(False)
         cont = self._pending_continuation
         self._pending_continuation = None
         if cont is not None:
             cont()
 
     def _on_background_error(self, exc: Exception) -> None:
+        if self.catalog_busy:
+            self.catalog_failed.emit(str(exc))
+            self.log_message.emit(f"Экспорт каталога не выполнен: {exc}")
+            return
         from .errors import (
             DeviceDisconnectedError,
             DeviceOfflineError,

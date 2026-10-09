@@ -55,6 +55,11 @@ class MainWindow(QMainWindow):
         self.ctrl.state_changed.connect(self._on_state)
         self.ctrl.log_message.connect(self._log)
         self.ctrl.progress_changed.connect(self._on_progress)
+        self.ctrl.catalog_busy_changed.connect(lambda _: self._apply_state())
+        self.ctrl.catalog_exported.connect(self._on_catalog_exported)
+        self.ctrl.catalog_failed.connect(
+            lambda message: QMessageBox.warning(self, APP_NAME, message)
+        )
 
         self._device_radios: dict[str, QRadioButton] = {}
         self._storage_radios: dict[str, QRadioButton] = {}
@@ -102,6 +107,12 @@ class MainWindow(QMainWindow):
         self.dest_edit = QLineEdit(self.ctrl.config.get("destination_path", "Music"))
         dest_row.addWidget(self.dest_edit)
         stor_layout.addLayout(dest_row)
+        self.export_btn = QPushButton("Экспорт каталога для плейлистов…")
+        self.export_btn.setToolTip(
+            "Сохранить список музыки из выбранной папки устройства в JSON для ChatGPT / Poweramp"
+        )
+        self.export_btn.clicked.connect(self._export_catalog)
+        stor_layout.addWidget(self.export_btn)
         root.addWidget(stor_box)
 
         # --- source panel ---
@@ -270,19 +281,29 @@ class MainWindow(QMainWindow):
 
     def _apply_state(self, state: str | None = None) -> None:
         s = AppState(state) if state else self.ctrl.state
+        busy = self.ctrl.catalog_busy
         transferring = s in (AppState.TRANSFERRING, AppState.SCANNING)
         running = s is AppState.TRANSFERRING
         # "Начать" is only meaningful once a transfer plan has been built
         # successfully and a valid engine is armed (state == READY). During
         # DISCONNECTED/FAILED there is no engine — keep it disabled so the user
         # re-runs "Проверить" instead of hitting a silent `adb exited 1`.
-        self.start_btn.setEnabled(s is AppState.READY and self.ctrl.engine is not None)
+        self.start_btn.setEnabled(not busy and s is AppState.READY and self.ctrl.engine is not None)
         self.pause_btn.setEnabled(running)
         self.resume_btn.setEnabled(s is AppState.PAUSED)
         self.cancel_btn.setEnabled(running or s is AppState.PAUSED or s is AppState.CANCELLING)
-        self.retry_btn.setEnabled(s is AppState.FAILED)
-        self.scan_btn.setEnabled(not transferring)
-        self.refresh_btn.setEnabled(not running)
+        self.retry_btn.setEnabled(not busy and s is AppState.FAILED)
+        self.scan_btn.setEnabled(not busy and not transferring)
+        self.refresh_btn.setEnabled(not busy and not running)
+        self.export_btn.setEnabled(
+            not busy
+            and s
+            not in (AppState.SCANNING, AppState.TRANSFERRING, AppState.PAUSED, AppState.CANCELLING)
+        )
+        self.export_btn.setText("Чтение каталога…" if busy else "Экспорт каталога для плейлистов…")
+        self.dest_edit.setEnabled(not busy)
+        for radio in (*self._device_radios.values(), *self._storage_radios.values()):
+            radio.setEnabled(not busy)
 
     def _on_progress(self, progress) -> None:
         total = progress.total_files
@@ -305,6 +326,29 @@ class MainWindow(QMainWindow):
         return datetime.now().strftime("%H:%M:%S")
 
     # -- user actions ------------------------------------------------------
+    def _export_catalog(self) -> None:
+        if (
+            self.ctrl.selected_device is None
+            or not self.ctrl.selected_device.is_ready
+            or self.ctrl.selected_storage is None
+        ):
+            QMessageBox.warning(self, APP_NAME, "Выберите подключённое устройство и хранилище.")
+            return
+        output, _ = QFileDialog.getSaveFileName(
+            self, "Сохранить каталог музыки", "jm21_catalog.json", "JSON (*.json)"
+        )
+        if output:
+            self.ctrl.export_catalog_async(self.dest_edit.text(), output)
+
+    def _on_catalog_exported(self, output: str, count: int) -> None:
+        QMessageBox.information(
+            self,
+            APP_NAME,
+            f"Каталог сохранён: {output}\nТреков: {count}\n\n"
+            "Пришлите этот JSON в ChatGPT для составления плейлистов Poweramp.\n"
+            "Готовые M3U8 размещайте в подпапке ChatGPT_Playlists выбранной папки музыки.",
+        )
+
     def _choose_source(self) -> None:
         folder = QFileDialog.getExistingDirectory(self, "Выберите папку с музыкой")
         if folder:

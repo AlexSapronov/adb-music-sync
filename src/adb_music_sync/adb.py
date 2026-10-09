@@ -123,9 +123,9 @@ class AdbClient:
             proc = subprocess.run(
                 cmd,
                 capture_output=True,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
+                text=args[0] != "exec-out",
+                encoding="utf-8" if args[0] != "exec-out" else None,
+                errors="replace" if args[0] != "exec-out" else None,
                 timeout=timeout,
                 check=False,
                 creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0,
@@ -135,7 +135,13 @@ class AdbClient:
         except subprocess.TimeoutExpired as exc:
             raise AdbCommandError(f"adb timed out: {' '.join(args)}") from exc
         # decode may contain nulls from shell byte dumps; keep as-is
-        return CommandResult(proc.returncode, proc.stdout, proc.stderr)
+        stdout = proc.stdout.decode("utf-8") if isinstance(proc.stdout, bytes) else proc.stdout
+        stderr = (
+            proc.stderr.decode("utf-8", errors="replace")
+            if isinstance(proc.stderr, bytes)
+            else proc.stderr
+        )
+        return CommandResult(proc.returncode, stdout, stderr)
 
     def _run_checked(
         self,
@@ -302,6 +308,17 @@ class AdbClient:
         """
         r = self._run_checked(["shell", command], serial=serial, target=target, timeout=60.0)
         return r.stdout.rstrip("\n")
+
+    def list_audio_files(self, root: str, *, target: AdbTarget | None = None) -> list[str]:
+        """Read paths in one recursive scan; NUL delimiters preserve newlines."""
+        from .scanner import is_supported
+
+        result = self._run_checked(
+            ["exec-out", f"find {_posix_quote(root)} -type f -print0"],
+            target=target,
+            timeout=300.0,
+        )
+        return sorted({path for path in result.stdout.split("\0") if path and is_supported(path)})
 
     def shell_list(
         self, command: str, *, serial: str | None = None, target: AdbTarget | None = None

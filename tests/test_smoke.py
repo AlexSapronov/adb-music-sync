@@ -16,7 +16,7 @@ def test_import_entry_modules():
     import adb_music_sync.storage
     import adb_music_sync.transfer
 
-    assert adb_music_sync.__version__ == "0.1.3"
+    assert adb_music_sync.__version__ == "0.1.4"
 
 
 def test_entry_point_importable():
