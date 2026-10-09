@@ -19,12 +19,14 @@ from PySide6.QtWidgets import (
     QProgressBar,
     QPushButton,
     QRadioButton,
+    QTabWidget,
     QVBoxLayout,
     QWidget,
 )
 
 from . import APP_NAME, __version__
 from .controller import Controller
+from .duplicates_gui import DuplicatesPane
 from .logging_setup import get_logger, setup_logging
 from .models import AppState
 
@@ -56,6 +58,7 @@ class MainWindow(QMainWindow):
         self.ctrl.log_message.connect(self._log)
         self.ctrl.progress_changed.connect(self._on_progress)
         self.ctrl.catalog_busy_changed.connect(lambda _: self._apply_state())
+        self.ctrl.maintenance_busy_changed.connect(lambda _: self._apply_state())
         self.ctrl.catalog_exported.connect(self._on_catalog_exported)
         self.ctrl.catalog_failed.connect(
             lambda message: QMessageBox.warning(self, APP_NAME, message)
@@ -115,6 +118,14 @@ class MainWindow(QMainWindow):
         stor_layout.addWidget(self.export_btn)
         root.addWidget(stor_box)
 
+        self.tabs = QTabWidget()
+        transfer_tab = QWidget()
+        transfer_layout = QVBoxLayout(transfer_tab)
+        self.tabs.addTab(transfer_tab, "Перенос музыки")
+        self.duplicates_pane = DuplicatesPane(self.ctrl, lambda: self.dest_edit.text())
+        self.tabs.addTab(self.duplicates_pane, "Дубликаты")
+        root.addWidget(self.tabs)
+
         # --- source panel ---
         src_box = QGroupBox("Музыка на ПК")
         src_layout = QGridLayout(src_box)
@@ -131,7 +142,7 @@ class MainWindow(QMainWindow):
         # pre-check summary
         self.check_summary = QLabel("")
         src_layout.addWidget(self.check_summary, 2, 0, 1, 5)
-        root.addWidget(src_box)
+        transfer_layout.addWidget(src_box)
 
         # --- transfer panel ---
         tr_box = QGroupBox("Передача")
@@ -162,7 +173,7 @@ class MainWindow(QMainWindow):
         for b in (self.start_btn, self.pause_btn, self.resume_btn, self.cancel_btn, self.retry_btn):
             btns.addWidget(b)
         tr_layout.addLayout(btns)
-        root.addWidget(tr_box)
+        transfer_layout.addWidget(tr_box)
 
         # --- log panel ---
         self.log_view = QPlainTextEdit()
@@ -281,7 +292,7 @@ class MainWindow(QMainWindow):
 
     def _apply_state(self, state: str | None = None) -> None:
         s = AppState(state) if state else self.ctrl.state
-        busy = self.ctrl.catalog_busy
+        busy = self.ctrl.catalog_busy or self.ctrl.maintenance_busy
         transferring = s in (AppState.TRANSFERRING, AppState.SCANNING)
         running = s is AppState.TRANSFERRING
         # "Начать" is only meaningful once a transfer plan has been built
@@ -370,6 +381,14 @@ class MainWindow(QMainWindow):
         self.ctrl.start_transfer(self.dest_edit.text())
 
     def closeEvent(self, event) -> None:  # noqa: N802
+        if self.ctrl.maintenance_busy:
+            QMessageBox.information(
+                self,
+                APP_NAME,
+                "Дождитесь завершения операции или нажмите «Остановить» во вкладке «Дубликаты».",
+            )
+            event.ignore()
+            return
         if self.ctrl.state in (AppState.TRANSFERRING, AppState.PAUSED):
             answer = QMessageBox.question(
                 self,

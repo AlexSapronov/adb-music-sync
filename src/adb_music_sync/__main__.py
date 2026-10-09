@@ -27,7 +27,7 @@ def _smoke_test() -> int:
     purely by the exit code (0 = ok).
     """
     # Verify PySide6/Qt actually loads (proves plugins/runtime are bundled).
-    from PySide6.QtWidgets import QApplication, QFileDialog, QWidget
+    from PySide6.QtWidgets import QApplication, QFileDialog
 
     import adb_music_sync  # noqa: F401
     import adb_music_sync.adb  # noqa: F401
@@ -40,7 +40,10 @@ def _smoke_test() -> int:
         app = QApplication.instance() or QApplication(sys.argv)
         # Load the real Qt platform plugin (qwindows on Windows) and construct
         # widgets/dialogs without showing windows or probing ADB.
-        widget = QWidget()
+        from adb_music_sync.controller import Controller
+        from adb_music_sync.gui import MainWindow
+
+        widget = MainWindow(Controller())
         dialog = QFileDialog(widget)
         widget.ensurePolished()
         dialog.ensurePolished()

@@ -48,6 +48,9 @@ class _WorkerThread(QThread):
 class Controller(QObject):
     """Coordinates all backend operations and exposes them to the UI."""
 
+    maintenance_busy_changed = Signal(bool)
+    maintenance_failed = Signal(str)
+    maintenance_message = Signal(str)
     catalog_exported = Signal(str, int)
     catalog_busy_changed = Signal(bool)
     catalog_failed = Signal(str)
@@ -73,6 +76,7 @@ class Controller(QObject):
         self.plan: TransferPlan | None = None
         self.engine: TransferEngine | None = None
         self.state = AppState.IDLE
+        self.maintenance_busy = False
         self.catalog_busy = False
         self._worker: _WorkerThread | None = None
         self._discovery_worker: _WorkerThread | None = None
@@ -234,6 +238,21 @@ class Controller(QObject):
                 self._save()
                 return
 
+    def run_maintenance(self, fn, on_done) -> bool:
+        """Serialize device maintenance with scanning/export/transfers."""
+        if (
+            self._worker is not None
+            or self._discovery_worker is not None
+            or self.state
+            in (AppState.TRANSFERRING, AppState.PAUSED, AppState.CANCELLING, AppState.SCANNING)
+        ):
+            self.maintenance_failed.emit("Дождитесь завершения текущей операции.")
+            return False
+        self.maintenance_busy = True
+        self.maintenance_busy_changed.emit(True)
+        self._run_background(fn, on_done)
+        return True
+
     # -- device catalog ----------------------------------------------------
     def export_catalog_async(self, music_folder: str, output: str) -> None:
         if self._worker is not None or self.state in (
@@ -280,6 +299,8 @@ class Controller(QObject):
         scan -> callback -> build plan -> callback -> READY. The two steps
         are chained sequentially on purpose (never two QThreads at once).
         """
+        if self._worker is not None or self.maintenance_busy or self.catalog_busy:
+            return
         self.set_state(AppState.SCANNING)
         self._pending_destination = destination
         self._run_background(lambda: scan_library(folder), self._on_scan_done)
@@ -350,6 +371,8 @@ class Controller(QObject):
 
     # -- transfer ----------------------------------------------------------
     def start_transfer(self, destination: str) -> None:
+        if self._worker is not None or self.maintenance_busy or self.catalog_busy:
+            return
         if self.state in (AppState.TRANSFERRING, AppState.PAUSED):
             return  # guard against double-start
         if self.engine is None:
@@ -438,6 +461,9 @@ class Controller(QObject):
     def _on_worker_finished(self, worker: _WorkerThread) -> None:
         if self._worker is worker:
             self._worker = None
+        if self.maintenance_busy:
+            self.maintenance_busy = False
+            self.maintenance_busy_changed.emit(False)
         if self.catalog_busy:
             self.catalog_busy = False
             self.catalog_busy_changed.emit(False)
@@ -447,6 +473,10 @@ class Controller(QObject):
             cont()
 
     def _on_background_error(self, exc: Exception) -> None:
+        if self.maintenance_busy:
+            self.maintenance_failed.emit(str(exc))
+            self.log_message.emit(str(exc))
+            return
         if self.catalog_busy:
             self.catalog_failed.emit(str(exc))
             self.log_message.emit(f"Экспорт каталога не выполнен: {exc}")

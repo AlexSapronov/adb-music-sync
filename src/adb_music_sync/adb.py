@@ -15,9 +15,14 @@ Design notes:
 
 from __future__ import annotations
 
+import base64
+import hashlib
+import re
 import shutil
 import subprocess
 import sys
+import tempfile
+import uuid
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -309,16 +314,93 @@ class AdbClient:
         r = self._run_checked(["shell", command], serial=serial, target=target, timeout=60.0)
         return r.stdout.rstrip("\n")
 
-    def list_audio_files(self, root: str, *, target: AdbTarget | None = None) -> list[str]:
-        """Read paths in one recursive scan; NUL delimiters preserve newlines."""
-        from .scanner import is_supported
-
+    def list_files(self, root: str, *, target: AdbTarget | None = None) -> list[str]:
+        """Strict recursive read; NUL delimiters preserve every path."""
         result = self._run_checked(
             ["exec-out", f"find {_posix_quote(root)} -type f -print0"],
             target=target,
             timeout=300.0,
         )
-        return sorted({path for path in result.stdout.split("\0") if path and is_supported(path)})
+        return sorted({path for path in result.stdout.split("\0") if path})
+
+    def list_audio_files(self, root: str, *, target: AdbTarget | None = None) -> list[str]:
+        from .scanner import is_supported
+
+        return [path for path in self.list_files(root, target=target) if is_supported(path)]
+
+    def path_exists(self, path: str, *, target: AdbTarget) -> bool:
+        # Include dangling symlinks: they must not be overwritten either.
+        out = self.shell(
+            f"if [ -e {_posix_quote(path)} ] || [ -L {_posix_quote(path)} ]; "
+            "then printf yes; else printf no; fi",
+            target=target,
+        )
+        if out not in ("yes", "no"):
+            raise AdbCommandError("Invalid existence response")
+        return out == "yes"
+
+    def canonical_path(self, path: str, *, target: AdbTarget) -> str:
+        result = self._run_checked(
+            ["exec-out", f"readlink -f {_posix_quote(path)}"],
+            target=target,
+        )
+        return result.stdout.removesuffix("\n")
+
+    def sha256(self, path: str, *, target: AdbTarget) -> str:
+        # Hash stdin so shell tools cannot escape or decorate the filename.
+        result = self._run_checked(
+            ["shell", f"sha256sum < {_posix_quote(path)}"],
+            target=target,
+            timeout=3600.0,
+        )
+        digest = result.stdout.split()[0] if result.stdout.split() else ""
+        if not re.fullmatch(r"[0-9a-fA-F]{64}", digest):
+            raise AdbCommandError(f"Invalid SHA-256 response: {path}")
+        return digest.lower()
+
+    def read_bytes(self, path: str, *, target: AdbTarget, limit: int = 16 * 1024 * 1024) -> bytes:
+        size = self.shell_stat_size(path, target=target)
+        if size is None or size > limit:
+            raise AdbCommandError(f"Cannot read missing/oversized text file: {path}")
+        result = self._run_checked(["exec-out", f"base64 < {_posix_quote(path)}"], target=target)
+        try:
+            data = base64.b64decode("".join(result.stdout.split()), validate=True)
+        except ValueError as exc:
+            raise AdbCommandError(f"Invalid text-file response: {path}") from exc
+        if len(data) != size:
+            raise AdbCommandError(f"Text file changed while reading: {path}")
+        return data
+
+    def write_bytes(self, path: str, data: bytes, *, target: AdbTarget) -> None:
+        """Push a small control file, verify bytes, then rename it atomically."""
+        remote_temp = path + "." + uuid.uuid4().hex + ".part"
+        local = None
+        try:
+            with tempfile.NamedTemporaryFile(delete=False) as stream:
+                stream.write(data)
+                local = Path(stream.name)
+            self.push(str(local), remote_temp, target=target)
+            if self.sha256(remote_temp, target=target) != hashlib.sha256(data).hexdigest():
+                raise AdbCommandError(f"Written file verification failed: {path}")
+            self.shell_mv(remote_temp, path, target=target)
+        finally:
+            if local is not None:
+                local.unlink(missing_ok=True)
+        # A failed push may leave a .part, never overwrite the original file.
+
+    def move_no_replace(self, source: str, destination: str, *, target: AdbTarget) -> None:
+        # mv -n is available in Android toybox; verify it actually moved the
+        # source, since mv -n can return success when a destination exists.
+        if self.path_exists(destination, target=target):
+            raise AdbCommandError(f"Refusing to overwrite: {destination}")
+        self._run_checked(
+            ["shell", f"mv -n {_posix_quote(source)} {_posix_quote(destination)}"],
+            target=target,
+        )
+        if self.path_exists(source, target=target) or not self.path_exists(
+            destination, target=target
+        ):
+            raise AdbCommandError(f"Move did not complete: {source}")
 
     def shell_list(
         self, command: str, *, serial: str | None = None, target: AdbTarget | None = None
